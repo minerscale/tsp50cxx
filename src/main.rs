@@ -1,76 +1,166 @@
+/*
+ * This software is based on the TSP50C0X/1X spec from https://www.ti.com/lit/ml/spss011d/spss011d.pdf
+ */
+
 #![allow(dead_code)]
 #![allow(clippy::upper_case_acronyms)]
 
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
+use slicevec::SliceVec;
 use std::{
+    collections::HashMap,
     fmt::{self, Debug},
+    fs::File,
+    io::Read,
     ops::{Index, IndexMut},
+    str::FromStr,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum Instruction {
-    ABAAC,
-    ACAAC(u12),
-    AGEC(u8),
-    AMAAC,
-    ANDCM(u8),
-    ANEC(u8),
-    AXCA(u8),
-    AXMA,
-    AXTM,
-    BR(u16),
+    CALL(Option<u16>),
+    TXA,
+    TMA,
+    XBA,
+    TAMIX,
+    TMAIX,
+    SARA,
+    TAM,
+    TTMA,
+    TAX,
+    TAPSC,
+    TAB,
+    SALA4,
+    TASYN,
+    TAMODE,
+    TATM,
     BRA,
-    CALL(u14),
-    CLA,
-    CLB,
     CLX,
-    DECMN,
+    IXC,
     DECXN,
-    EXTSG,
-    GET(u8),
-    IAC,
+    XBX,
+    CLB,
     IBC,
     INCMC,
-    INTGR,
-    IXC,
-    LUAA,
-    LUAB,
-    LUAPS,
-    ORCM(u8),
-    RETI,
-    RETN,
-    SALA,
-    SALA4,
-    SARA,
-    SBAAN,
-    SBR(u8),
-    SETOFF,
+    DECMN,
+    AMAAC,
     SMAAN,
-    TAB,
-    TAM,
-    TAMD(u8),
-    TAMIX,
-    TAMODE,
-    TAPSC,
-    TASYN,
-    TATM,
-    TAX,
     TBM,
-    TCA(u8),
-    TCX(u8),
-    TMA,
-    TMAD(u8),
-    TMAIX,
-    TMXD(u8),
     TRNDA,
-    TSTCA(u8),
-    TSTCM(u8),
-    TTMA,
-    TXA,
-    XBA,
-    XBX,
-    XGEC(u8),
+    ABAAC,
+    SBAAN,
+    SALA,
+    CLA,
+    GET(Option<u8>),
+    AXTM,
+    AXMA,
+    IAC,
+    INTGR,
+    EXTSG,
+    RETN,
+    RETI,
+    SETOFF,
+    BR(Option<u16>),
+    ANEC(Option<u8>),
+    XGEC(Option<u8>),
+    TCX(Option<u8>),
+    AGEC(Option<u8>),
+    ORCM(Option<u8>),
+    ANDCM(Option<u8>),
+    TSTCM(Option<u8>),
+    TSTCA(Option<u8>),
+    AXCA(Option<u8>),
+    TMAD(Option<u8>),
+    TAMD(Option<u8>),
+    LUAA,
+    LUAPS,
+    LUAB,
+    TCA(Option<u8>),
+    TMXD(Option<u8>),
+    ACAAC(Option<u16>),
+    SBR(Option<u8>),
+}
+
+#[derive(Debug, Copy, Clone)]
+enum Directive<'a> {
+    I(Instruction),
+    Br(Option<&'a str>),
+}
+
+type I = Instruction;
+type D<'a> = Directive<'a>;
+
+impl TryFrom<&str> for Directive<'_> {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CALL" => Ok(D::I(I::CALL(None))),
+            "TXA" => Ok(D::I(I::TXA)),
+            "TMA" => Ok(D::I(I::TMA)),
+            "XBA" => Ok(D::I(I::XBA)),
+            "TAMIX" => Ok(D::I(I::TAMIX)),
+            "TMAIX" => Ok(D::I(I::TMAIX)),
+            "SARA" => Ok(D::I(I::SARA)),
+            "TAM" => Ok(D::I(I::TAM)),
+            "TTMA" => Ok(D::I(I::TTMA)),
+            "TAX" => Ok(D::I(I::TAX)),
+            "TAPSC" => Ok(D::I(I::TAPSC)),
+            "TAB" => Ok(D::I(I::TAB)),
+            "SALA4" => Ok(D::I(I::SALA4)),
+            "TASYN" => Ok(D::I(I::TASYN)),
+            "TAMODE" => Ok(D::I(I::TAMODE)),
+            "TATM" => Ok(D::I(I::TATM)),
+            "BRA" => Ok(D::I(I::BRA)),
+            "CLX" => Ok(D::I(I::CLX)),
+            "IXC" => Ok(D::I(I::IXC)),
+            "DECXN" => Ok(D::I(I::DECXN)),
+            "XBX" => Ok(D::I(I::XBX)),
+            "CLB" => Ok(D::I(I::CLB)),
+            "IBC" => Ok(D::I(I::IBC)),
+            "INCMC" => Ok(D::I(I::INCMC)),
+            "DECMN" => Ok(D::I(I::DECMN)),
+            "AMAAC" => Ok(D::I(I::AMAAC)),
+            "SMAAN" => Ok(D::I(I::SMAAN)),
+            "TBM" => Ok(D::I(I::TBM)),
+            "TRNDA" => Ok(D::I(I::TRNDA)),
+            "ABAAC" => Ok(D::I(I::ABAAC)),
+            "SBAAN" => Ok(D::I(I::SBAAN)),
+            "SALA" => Ok(D::I(I::SALA)),
+            "CLA" => Ok(D::I(I::CLA)),
+            "GET" => Ok(D::I(I::GET(None))),
+            "AXTM" => Ok(D::I(I::AXTM)),
+            "AXMA" => Ok(D::I(I::AXMA)),
+            "IAC" => Ok(D::I(I::IAC)),
+            "INTGR" => Ok(D::I(I::INTGR)),
+            "EXTSG" => Ok(D::I(I::EXTSG)),
+            "RETN" => Ok(D::I(I::RETN)),
+            "RETI" => Ok(D::I(I::RETI)),
+            "SETOFF" => Ok(D::I(I::SETOFF)),
+            "BR" => Ok(D::I(I::BR(None))),
+            "ANEC" => Ok(D::I(I::ANEC(None))),
+            "XGEC" => Ok(D::I(I::XGEC(None))),
+            "TCX" => Ok(D::I(I::TCX(None))),
+            "AGEC" => Ok(D::I(I::AGEC(None))),
+            "ORCM" => Ok(D::I(I::ORCM(None))),
+            "ANDCM" => Ok(D::I(I::ANDCM(None))),
+            "TSTCM" => Ok(D::I(I::TSTCM(None))),
+            "TSTCA" => Ok(D::I(I::TSTCA(None))),
+            "AXCA" => Ok(D::I(I::AXCA(None))),
+            "TMAD" => Ok(D::I(I::TMAD(None))),
+            "TAMD" => Ok(D::I(I::TAMD(None))),
+            "LUAA" => Ok(D::I(I::LUAA)),
+            "LUAPS" => Ok(D::I(I::LUAPS)),
+            "LUAB" => Ok(D::I(I::LUAB)),
+            "TCA" => Ok(D::I(I::TCA(None))),
+            "TMXD" => Ok(D::I(I::TMXD(None))),
+            "ACAAC" => Ok(D::I(I::ACAAC(None))),
+            "SBR" => Ok(D::I(I::SBR(None))),
+            "Br" => Ok(D::Br(None)),
+            _ => Err(()),
+        }
+    }
 }
 
 impl Instruction {
@@ -78,8 +168,98 @@ impl Instruction {
         matches!(opcode, 0x00..=0x0F | 0x40..=0x6A | 0x6E..=0x7F)
     }
 
-    pub fn opcode_to_instruction(opcode: u8) -> Instruction {
-        type I = Instruction;
+    pub fn set_operand_value(self, value: usize) -> Self {
+        match self {
+            I::CALL(_) => I::CALL(Some(value.try_into().unwrap())),
+            I::GET(_) => I::GET(Some(value.try_into().unwrap())),
+            I::BR(_) => I::BR(Some(value.try_into().unwrap())),
+            I::ANEC(_) => I::ANEC(Some(value.try_into().unwrap())),
+            I::XGEC(_) => I::XGEC(Some(value.try_into().unwrap())),
+            I::TCX(_) => I::TCX(Some(value.try_into().unwrap())),
+            I::AGEC(_) => I::AGEC(Some(value.try_into().unwrap())),
+            I::ORCM(_) => I::ORCM(Some(value.try_into().unwrap())),
+            I::ANDCM(_) => I::ANDCM(Some(value.try_into().unwrap())),
+            I::TSTCM(_) => I::TSTCM(Some(value.try_into().unwrap())),
+            I::TSTCA(_) => I::TSTCA(Some(value.try_into().unwrap())),
+            I::AXCA(_) => I::AXCA(Some(value.try_into().unwrap())),
+            I::TMAD(_) => I::TMAD(Some(value.try_into().unwrap())),
+            I::TAMD(_) => I::TAMD(Some(value.try_into().unwrap())),
+            I::TCA(_) => I::TCA(Some(value.try_into().unwrap())),
+            I::TMXD(_) => I::TMXD(Some(value.try_into().unwrap())),
+            I::ACAAC(_) => I::ACAAC(Some(value.try_into().unwrap())),
+            I::SBR(_) => I::SBR(Some(value.try_into().unwrap())),
+            x => panic!("{x:?} has no operand"),
+        }
+    }
+
+    pub fn to_opcode(self) -> (u8, Option<u8>) {
+        match self {
+            I::CALL(Some(x)) => ((x >> 8) as u8, Some(x as u8)),
+            I::TXA => (0x10, None),
+            I::TMA => (0x11, None),
+            I::XBA => (0x12, None),
+            I::TAMIX => (0x13, None),
+            I::TMAIX => (0x14, None),
+            I::SARA => (0x15, None),
+            I::TAM => (0x16, None),
+            I::TTMA => (0x17, None),
+            I::TAX => (0x18, None),
+            I::TAPSC => (0x19, None),
+            I::TAB => (0x1a, None),
+            I::SALA4 => (0x1b, None),
+            I::TASYN => (0x1c, None),
+            I::TAMODE => (0x1d, None),
+            I::TATM => (0x1e, None),
+            I::BRA => (0x1f, None),
+            I::CLX => (0x20, None),
+            I::IXC => (0x21, None),
+            I::DECXN => (0x22, None),
+            I::XBX => (0x23, None),
+            I::CLB => (0x24, None),
+            I::IBC => (0x25, None),
+            I::INCMC => (0x26, None),
+            I::DECMN => (0x27, None),
+            I::AMAAC => (0x28, None),
+            I::SMAAN => (0x29, None),
+            I::TBM => (0x2a, None),
+            I::TRNDA => (0x2b, None),
+            I::ABAAC => (0x2c, None),
+            I::SBAAN => (0x2d, None),
+            I::SALA => (0x2e, None),
+            I::CLA => (0x2f, None),
+            I::GET(Some(x)) => (0x30 | x, None),
+            I::AXTM => (0x38, None),
+            I::AXMA => (0x39, None),
+            I::IAC => (0x3a, None),
+            I::INTGR => (0x3b, None),
+            I::EXTSG => (0x3c, None),
+            I::RETN => (0x3d, None),
+            I::RETI => (0x3e, None),
+            I::SETOFF => (0x3f, None),
+            I::BR(Some(x)) => (0x40 | ((x >> 8) as u8), Some(x as u8)),
+            I::ANEC(Some(x)) => (0x60, Some(x)),
+            I::XGEC(Some(x)) => (0x61, Some(x)),
+            I::TCX(Some(x)) => (0x62, Some(x)),
+            I::AGEC(Some(x)) => (0x63, Some(x)),
+            I::ORCM(Some(x)) => (0x64, Some(x)),
+            I::ANDCM(Some(x)) => (0x65, Some(x)),
+            I::TSTCM(Some(x)) => (0x66, Some(x)),
+            I::TSTCA(Some(x)) => (0x67, Some(x)),
+            I::AXCA(Some(x)) => (0x68, Some(x)),
+            I::TMAD(Some(x)) => (0x69, Some(x)),
+            I::TAMD(Some(x)) => (0x6a, Some(x)),
+            I::LUAA => (0x6b, None),
+            I::LUAPS => (0x6c, None),
+            I::LUAB => (0x6d, None),
+            I::TCA(Some(x)) => (0x6e, Some(x)),
+            I::TMXD(Some(x)) => (0x6f, Some(x)),
+            I::ACAAC(Some(x)) => (0x70 | ((x >> 8) as u8), Some(x as u8)),
+            I::SBR(Some(x)) => (0x80 | x, None),
+            _ => panic!("attempt to use opcode with None operand"),
+        }
+    }
+
+    pub fn opcode_to_instruction(opcode: u8) -> Self {
         match opcode {
             0x6B => I::LUAA,
             0x6C => I::LUAPS,
@@ -116,7 +296,7 @@ impl Instruction {
             0x2D => I::SBAAN,
             0x2E => I::SALA,
             0x2F => I::CLA,
-            0x30..=0x37 => I::GET(opcode & 0b0111),
+            0x30..=0x37 => I::GET(Some(opcode & 0b0111)),
             0x38 => I::AXTM,
             0x39 => I::AXMA,
             0x3A => I::IAC,
@@ -125,30 +305,29 @@ impl Instruction {
             0x3D => I::RETN,
             0x3E => I::RETI,
             0x3F => I::SETOFF,
-            0x80..=0xFF => I::SBR(opcode & 0b0111_1111),
+            0x80..=0xFF => I::SBR(Some(opcode & 0b0111_1111)),
             _ => unreachable!("Opcode with operand called without operand byte."),
         }
     }
 
-    pub fn opcode_to_instruction_with_operand_byte(opcode: u8, operand: u8) -> Instruction {
-        type I = Instruction;
+    pub fn opcode_to_instruction_with_operand_byte(opcode: u8, operand: u8) -> Self {
         match opcode {
-            0x00..=0x0F => I::CALL(u14::new((opcode as u16) << 8 | operand as u16)),
-            0x40..=0x5F => I::BR(((opcode & 0b0001_1111) as u16) << 8 | operand as u16),
-            0x60 => I::ANEC(operand),
-            0x61 => I::XGEC(operand),
-            0x62 => I::TCX(operand),
-            0x63 => I::AGEC(operand),
-            0x64 => I::ORCM(operand),
-            0x65 => I::ANDCM(operand),
-            0x66 => I::TSTCM(operand),
-            0x67 => I::TSTCA(operand),
-            0x68 => I::AXCA(operand),
-            0x69 => I::TMAD(operand),
-            0x6A => I::TAMD(operand),
-            0x6E => I::TCA(operand),
-            0x6F => I::TMXD(operand),
-            0x70..=0x7F => I::ACAAC(u12::new(((opcode & 0b1111) as u16) << 8 | operand as u16)),
+            0x00..=0x0F => I::CALL(Some((opcode as u16) << 8 | operand as u16)),
+            0x40..=0x5F => I::BR(Some(((opcode & 0b0001_1111) as u16) << 8 | operand as u16)),
+            0x60 => I::ANEC(Some(operand)),
+            0x61 => I::XGEC(Some(operand)),
+            0x62 => I::TCX(Some(operand)),
+            0x63 => I::AGEC(Some(operand)),
+            0x64 => I::ORCM(Some(operand)),
+            0x65 => I::ANDCM(Some(operand)),
+            0x66 => I::TSTCM(Some(operand)),
+            0x67 => I::TSTCA(Some(operand)),
+            0x68 => I::AXCA(Some(operand)),
+            0x69 => I::TMAD(Some(operand)),
+            0x6A => I::TAMD(Some(operand)),
+            0x6E => I::TCA(Some(operand)),
+            0x6F => I::TMXD(Some(operand)),
+            0x70..=0x7F => I::ACAAC(Some(((opcode & 0b1111) as u16) << 8 | operand as u16)),
             _ => unreachable!("Opcode without operand called with operand byte."),
         }
     }
@@ -356,7 +535,7 @@ struct TSP50 {
 
 impl fmt::Debug for TSP50 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("pc: {:04x} | a: {:04x} | b: {:04x} | x: {:02x} | status: {:x} | mode: {:?} | stack: [{:04x}|{:04x}|{:04x}] | sp: {:3?}",
+        f.write_fmt(format_args!("pc: {:04x} | a: {:04x} | b: {:04x} | x: {:02x} | s: {:x} | mode: {:?} | stack: [{:04x}|{:04x}|{:04x}] | sp: {:3?}",
             &self.pc, &self.a.unwrap_or_default(), &self.b.unwrap_or_default(), &self.x.unwrap_or_default(), &(self.status.unwrap_or_default() as u8), &self.integer_mode, &self.stack.stack[0].unwrap_or_default(), &self.stack.stack[1].unwrap_or_default(), &self.stack.stack[2].unwrap_or_default(), &self.stack.sp))
     }
 }
@@ -386,16 +565,128 @@ impl TSP50 {
         }
     }
 
-    pub fn step(&mut self) -> bool {
+    pub fn assemble(&mut self, program: &str) {
+        // step 1: create AST
+        // todo: ugly and bad tokeniser might want to clean up
+        let ast: Vec<(Option<&str>, Directive)> = program
+            .lines()
+            .filter_map(|line| {
+                // Comment delimiter
+                let line = match line.split_once('%') {
+                    Some(x) => x.0,
+                    None => line,
+                };
+
+                let mut words = line.split_whitespace();
+
+                let first_word = match words.next() {
+                    Some(x) => x,
+                    None => return None,
+                };
+
+                fn attatch_operand_to_directive<'a>(
+                    directive: Directive<'a>,
+                    operand: &'a str,
+                ) -> Directive<'a> {
+                    match directive {
+                        D::I(i) => {
+                            let operand: usize = if operand.starts_with('#') {
+                                usize::from_str_radix(&operand[1..], 16)
+                            } else {
+                                usize::from_str(operand)
+                            }
+                            .expect("failed to parse literal");
+                            D::I(i.set_operand_value(operand))
+                        }
+                        D::Br(_) => D::Br(Some(operand)),
+                    }
+                }
+
+                Some(match Directive::try_from(first_word) {
+                    Ok(directive) => (
+                        None,
+                        match words.next() {
+                            Some(operand) => attatch_operand_to_directive(directive, operand),
+                            None => directive,
+                        },
+                    ),
+                    Err(_) => {
+                        match Directive::try_from(words.next().expect("label with no opcode")) {
+                            Ok(directive) => (
+                                Some(
+                                    first_word
+                                        .rsplit_once(':')
+                                        .expect("labels must have colons")
+                                        .0,
+                                ),
+                                match words.next() {
+                                    Some(operand) => {
+                                        attatch_operand_to_directive(directive, operand)
+                                    }
+                                    None => directive,
+                                },
+                            ),
+                            Err(_) => {
+                                panic!("a directive needs to immediately follow a label")
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Using a slicevec allows us to construct our assembled program in place.
+        let mut assembled = SliceVec::new(&mut self.rom);
+        let mut labels: HashMap<&str, u16> = HashMap::new();
+        let mut references: Vec<(&str, usize)> = Vec::new();
+
+        for (label, directive) in ast {
+            if let Some(l) = label {
+                if let Some(v) = labels.insert(l, assembled.len().try_into().unwrap()) {
+                    panic!("label {v} used twice");
+                }
+            }
+
+            let instruction = match directive {
+                Directive::I(i) => i,
+                Directive::Br(Some(i)) => {
+                    references.push((i, assembled.len()));
+                    I::BR(Some(0x00))
+                }
+                _ => panic!("attempt to use directive with None label"),
+            };
+
+            match instruction.to_opcode() {
+                (i, None) => assembled.push(i).unwrap(),
+                (i, Some(o)) => {
+                    assembled.push(i).unwrap();
+                    assembled.push(o).unwrap()
+                }
+            }
+        }
+
+        // Fix addresses
+        for reference in references {
+            let opcode = I::BR(Some(labels[reference.0])).to_opcode();
+            assembled[reference.1] = opcode.0;
+            assembled[reference.1 + 1] = opcode.1.unwrap();
+        }
+    }
+
+    pub fn run(&mut self) {
+        while !self.step() {
+            println!("{:?}", self);
+        }
+    }
+
+    fn step(&mut self) -> bool {
         let instruction = self.fetch();
-        print!("{:10} ", format!("{:02x?}", instruction));
         self.execute(instruction)
     }
 
     fn fetch(&mut self) -> Instruction {
         let opcode: u8 = self.rom[self.pc.value() as usize];
         let next_idx = self.pc.wrapping_add(u14::ONE);
-        print!(" {:#02x} | ", opcode);
 
         match Instruction::has_operand_byte(opcode) {
             true => {
@@ -502,7 +793,7 @@ impl TSP50 {
         let mode = self.mode.unwrap();
         if mode.contains(Mode::RAMROM) {
             self.ps_buf = OptUninit::Some(Some(self.read_mem_8(self.x.unwrap())));
-        } else if mode.contains(Mode::EXTROM) { 
+        } else if mode.contains(Mode::EXTROM) {
             todo!("EXTROM is not yet supported");
         } else {
             self.ps_buf = OptUninit::Some(Some(self.rom[self.sar.unwrap().value() as usize]));
@@ -511,8 +802,6 @@ impl TSP50 {
     }
 
     fn execute(&mut self, instruction: Instruction) -> bool {
-        type I = Instruction;
-
         fn signed_shift_multiply(a: u14, b: u8) -> u14 {
             let a = a.value();
             assert!(a != 0x2000,
@@ -542,13 +831,13 @@ impl TSP50 {
                 self.set_status((a.value() as u8).overflowing_add(b.value() as u8).1);
                 self.a = OptUninit::Some(a.wrapping_add(b));
             }
-            I::ACAAC(operand) => {
+            I::ACAAC(Some(operand)) => {
                 let a = self.a.unwrap();
-                let operand = self.sign_extend_12_to_14_if_extended_sign(operand);
+                let operand = self.sign_extend_12_to_14_if_extended_sign(u12::new(operand));
                 self.set_status((a.value() as u8).overflowing_add(operand.value() as u8).1);
                 self.a = OptUninit::Some(a.wrapping_add(operand));
             }
-            I::AGEC(operand) => self.set_status((self.a.unwrap().value() as u8) >= operand),
+            I::AGEC(Some(operand)) => self.set_status((self.a.unwrap().value() as u8) >= operand),
             I::AMAAC => {
                 let mem = self.read_mem_sign_extend(self.x.unwrap());
                 self.set_status(
@@ -558,16 +847,16 @@ impl TSP50 {
                 );
                 self.a = OptUninit::Some(self.a.unwrap().wrapping_add(mem));
             }
-            I::ANDCM(operand) => {
+            I::ANDCM(Some(operand)) => {
                 self.set_status(true);
                 let addr = self.x.unwrap();
                 let mem = self.read_mem_8(addr);
                 self.write_mem_8(mem & operand, addr);
             }
-            I::ANEC(operand) => {
+            I::ANEC(Some(operand)) => {
                 self.set_status((self.a.unwrap().value() as u8) != operand);
             }
-            I::AXCA(operand) => {
+            I::AXCA(Some(operand)) => {
                 self.set_status(true);
                 self.a = OptUninit::Some(signed_shift_multiply(self.a.unwrap(), operand));
             }
@@ -580,7 +869,7 @@ impl TSP50 {
                 self.a =
                     OptUninit::Some(signed_shift_multiply(self.a.unwrap(), self.timer.unwrap()));
             }
-            I::BR(operand) => {
+            I::BR(Some(operand)) => {
                 if self.status.unwrap() {
                     self.pc = u14::new(operand);
                 }
@@ -590,10 +879,10 @@ impl TSP50 {
                 self.set_status(true);
                 self.pc = self.a.unwrap();
             }
-            I::CALL(operand) => {
+            I::CALL(Some(operand)) => {
                 if self.status.unwrap() {
                     self.stack.push(self.pc);
-                    self.pc = operand;
+                    self.pc = u14::new(operand);
                 }
 
                 self.set_status(true);
@@ -625,7 +914,7 @@ impl TSP50 {
                 self.integer_mode = OptUninit::Some(IntegerMode::ExtSign);
                 self.set_status(true);
             }
-            I::GET(operand) => {
+            I::GET(Some(operand)) => {
                 assert!((1..=8).contains(&operand));
                 let bits_left = self.ps_bits_left.unwrap();
 
@@ -661,10 +950,10 @@ impl TSP50 {
                     self.ps = OptUninit::Some(self.ps.unwrap() - bits_left);
                 }
 
-               /* From the spec:
-                * The status flag after either a GET 7 or a GET 8 is not reliable. If the state
-                * of the status flag following the GET instruction is important to the applica-
-                * tion, a GET 7 or a GET 8 should be avoided. */
+                /* From the spec:
+                 * The status flag after either a GET 7 or a GET 8 is not reliable. If the state
+                 * of the status flag following the GET instruction is important to the applica-
+                 * tion, a GET 7 or a GET 8 should be avoided. */
                 if operand >= 7 {
                     self.status = Default::default();
                 }
@@ -711,7 +1000,7 @@ impl TSP50 {
                 self.get_fetch_into_ps_buf();
                 self.set_status(true);
             }
-            I::ORCM(operand) => {
+            I::ORCM(Some(operand)) => {
                 self.set_status(true);
                 let addr = self.x.unwrap();
                 let mem = self.read_mem_8(addr);
@@ -727,41 +1016,41 @@ impl TSP50 {
             I::SALA => {
                 self.set_status((self.a.unwrap().value() & 0x80) != 0);
                 self.a = OptUninit::Some(self.a.unwrap() << 1);
-            },
+            }
             I::SALA4 => {
                 self.set_status(true);
                 self.a = OptUninit::Some(self.a.unwrap() << 4);
-            },
+            }
             I::SARA => {
                 self.set_status(true);
                 self.a = OptUninit::Some(self.a.unwrap() >> 1);
-            },
+            }
             I::SBAAN => {
                 self.set_status((self.a.unwrap().value() as u8) < (self.b.unwrap().value() as u8));
                 self.a = OptUninit::Some(self.a.unwrap().wrapping_sub(self.b.unwrap()));
-            },
-            I::SBR(operand) => {
+            }
+            I::SBR(Some(operand)) => {
                 self.set_status(true);
 
                 const PAGE_MASK: u14 = u14::new(0b11_1111_1000_0000);
                 if self.status.unwrap() {
                     self.pc = u14::new(operand as u16) | self.pc & PAGE_MASK;
                 } else {
-                   /* from the docs:
-                    * An SBR instruction executed at XX7Fh or XXFFh with status cleared
-                    * (branch not taken) goes to XX00h or XX80h, respectively.
-                    *
-                    * As far as I can tell this means that once the fetch increments the 
-                    * pc if it ends in 0x00 or 0x80 it needs have 0x80 subtracted from it
-                    * since XXFFh -> X(X+1)00h. Only God knows why this happens.
-                    */
+                    /* from the docs:
+                     * An SBR instruction executed at XX7Fh or XXFFh with status cleared
+                     * (branch not taken) goes to XX00h or XX80h, respectively.
+                     */
+
+                    /* As far as I can tell this means that once the fetch increments the
+                     * pc if it ends in 0x00 or 0x80 it needs have 0x80 subtracted from it
+                     * since XXFFh -> X(X+1)00h. Only God knows why this happens.
+                     */
 
                     if self.pc & PAGE_MASK == u14::ZERO {
                         self.pc -= u14::new(0x80);
                     }
                 }
-                
-            },
+            }
             I::SETOFF => return true,
             I::SMAAN => todo!(),
             I::TAB => todo!(),
@@ -770,8 +1059,9 @@ impl TSP50 {
             I::TAMIX => todo!(),
             I::TAMODE => {
                 self.set_status(true);
-                self.mode = OptUninit::Some(Mode::from_bits(self.a.unwrap().value() as u8).unwrap());
-            },
+                self.mode =
+                    OptUninit::Some(Mode::from_bits(self.a.unwrap().value() as u8).unwrap());
+            }
             I::TAPSC => todo!(),
             I::TASYN => todo!(),
             I::TATM => todo!(),
@@ -791,6 +1081,7 @@ impl TSP50 {
             I::XBA => todo!(),
             I::XBX => todo!(),
             I::XGEC(_) => todo!(),
+            _ => panic!("attempt to use opcode with None operand"),
         }
         false
     }
@@ -798,20 +1089,13 @@ impl TSP50 {
 
 fn main() {
     let mut emulator = TSP50::new();
-    emulator.rom[0] = 0x2F;
-    emulator.rom[1] = 0x3B;
-    emulator.rom[2] = 0x70;
-    emulator.rom[3] = 0xFE;
-    emulator.rom[4] = 0x3A;
-    emulator.rom[5] = 0x40;
-    emulator.rom[6] = 0x09;
-    emulator.rom[7] = 0x40;
-    emulator.rom[8] = 0x04;
-    emulator.rom[9] = 0x3F;
 
-    while !emulator.step() {
-        println!("{:?}", emulator);
-    }
+    let mut program = String::new();
+    File::open("src/test.asm")
+        .unwrap()
+        .read_to_string(&mut program)
+        .unwrap();
+    emulator.assemble(&program);
 
-    println!();
+    emulator.run();
 }
