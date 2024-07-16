@@ -6,4 +6,3 @@ edition = "2021"
 [dependencies]
 arbitrary-int = "1.2.7"
 bitflags = "2.6.0"
-slicevec = "0.1.1"

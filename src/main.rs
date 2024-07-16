@@ -7,7 +7,6 @@
 
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
-use slicevec::SliceVec;
 use std::{
     collections::HashMap,
     fmt::{self, Debug},
@@ -256,6 +255,36 @@ impl Instruction {
             I::ACAAC(Some(x)) => (0x70 | ((x >> 8) as u8), Some(x as u8)),
             I::SBR(Some(x)) => (0x80 | x, None),
             _ => panic!("attempt to use opcode with None operand"),
+        }
+    }
+
+    pub fn cycles(&self) -> usize {
+        if matches!(
+            self,
+            I::ACAAC(_)
+                | I::AGEC(_)
+                | I::ANDCM(_)
+                | I::ANEC(_)
+                | I::AXCA(_)
+                | I::BR(_)
+                | I::CALL(_)
+                | I::GET(_)
+                | I::LUAA
+                | I::LUAB
+                | I::LUAPS
+                | I::ORCM(_)
+                | I::TAMD(_)
+                | I::TCA(_)
+                | I::TCX(_)
+                | I::TMAD(_)
+                | I::TMXD(_)
+                | I::TSTCA(_)
+                | I::TSTCM(_)
+                | I::XGEC(_)
+        ) {
+            2
+        } else {
+            1
         }
     }
 
@@ -510,9 +539,41 @@ impl Num<u14> for u14 {
     const ONE: u14 = u14::new(1);
 }
 
+#[derive(Debug, PartialEq)]
+enum Status {
+    Continue,
+    Halt,
+}
+
+#[derive(Debug, Default)]
+enum Interrupt {
+    #[default]
+    Inactive,
+    Requested,
+    Active,
+}
+
+#[derive(Debug, Default)]
+struct Interrupt1 {
+    state: Interrupt,
+    a: OptUninit<u14>,
+    x: OptUninit<u8>,
+    b: OptUninit<u14>,
+    status: OptUninit<bool>,
+    integer_mode: OptUninit<IntegerMode>,
+}
+
+#[derive(Debug, Default)]
+struct Interrupt2 {
+    state: Interrupt,
+    status: OptUninit<bool>,
+    integer_mode: OptUninit<IntegerMode>,
+}
+
 struct TSP50 {
-    pc: u14,
+    num_cycles: usize,
     stack: Stack,
+    pc: u14,
     a: OptUninit<u14>,
     x: OptUninit<u8>,
     b: OptUninit<u14>,
@@ -520,12 +581,20 @@ struct TSP50 {
     integer_mode: OptUninit<IntegerMode>,
     timer: OptUninit<u8>,
     timer_prescale: OptUninit<u8>,
+    timer_prescale_count: OptUninit<u8>,
+    timer_begun: bool,
     pitch: OptUninit<u14>,
+    dac: OptUninit<i16>,
+    excitation: OptUninit<u14>,
     sar: OptUninit<u14>,
     ps: OptUninit<u8>,
     ps_buf: OptUninit<Option<u8>>,
     ps_bits_left: OptUninit<u8>,
-    mode: OptUninit<Mode>,
+    mode: Mode,
+    random: u16,
+
+    interrupt_1: Interrupt1,
+    interrupt_2: Interrupt2,
 
     synthesis_mem: [OptUninit<u12>; 16],
     mem: [OptUninit<u8>; 120],
@@ -540,11 +609,13 @@ impl fmt::Debug for TSP50 {
     }
 }
 
-impl TSP50 {
-    pub fn new() -> TSP50 {
+impl Default for TSP50 {
+    fn default() -> Self {
         TSP50 {
             pc: Default::default(),
             stack: Default::default(),
+            interrupt_1: Default::default(),
+            interrupt_2: Default::default(),
             a: Default::default(),
             x: Default::default(),
             b: Default::default(),
@@ -552,23 +623,51 @@ impl TSP50 {
             integer_mode: Default::default(),
             timer: Default::default(),
             timer_prescale: Default::default(),
+            timer_prescale_count: Default::default(),
+            timer_begun: Default::default(),
             pitch: Default::default(),
+            dac: Default::default(),
+            excitation: Default::default(),
             sar: Default::default(),
             ps: Default::default(),
             ps_buf: Default::default(),
             ps_bits_left: Default::default(),
             mode: Default::default(),
+            random: Default::default(),
+            num_cycles: Default::default(),
             synthesis_mem: [Default::default(); 16],
             mem: [Default::default(); 120],
             rom: [Default::default(); 16384],
             excitation_rom: [Default::default(); 384],
         }
     }
+}
 
-    pub fn assemble(&mut self, program: &str) {
-        // step 1: create AST
-        // todo: ugly and bad tokeniser might want to clean up
-        let ast: Vec<(Option<&str>, Directive)> = program
+impl TSP50 {
+    pub fn new() -> TSP50 {
+        Default::default()
+    }
+
+    fn make_ast(program: &str) -> Vec<(Option<&str>, Directive)> {
+        fn attatch_operand_to_directive<'a>(
+            directive: Directive<'a>,
+            operand: &'a str,
+        ) -> Directive<'a> {
+            match directive {
+                D::I(i) => {
+                    let operand: usize = if operand.starts_with('#') {
+                        usize::from_str_radix(&operand[1..], 16)
+                    } else {
+                        usize::from_str(operand)
+                    }
+                    .expect("failed to parse literal");
+                    D::I(i.set_operand_value(operand))
+                }
+                D::Br(_) => D::Br(Some(operand)),
+            }
+        }
+
+        program
             .lines()
             .filter_map(|line| {
                 // Comment delimiter
@@ -584,24 +683,6 @@ impl TSP50 {
                     None => return None,
                 };
 
-                fn attatch_operand_to_directive<'a>(
-                    directive: Directive<'a>,
-                    operand: &'a str,
-                ) -> Directive<'a> {
-                    match directive {
-                        D::I(i) => {
-                            let operand: usize = if operand.starts_with('#') {
-                                usize::from_str_radix(&operand[1..], 16)
-                            } else {
-                                usize::from_str(operand)
-                            }
-                            .expect("failed to parse literal");
-                            D::I(i.set_operand_value(operand))
-                        }
-                        D::Br(_) => D::Br(Some(operand)),
-                    }
-                }
-
                 Some(match Directive::try_from(first_word) {
                     Ok(directive) => (
                         None,
@@ -616,7 +697,7 @@ impl TSP50 {
                                 Some(
                                     first_word
                                         .rsplit_once(':')
-                                        .expect("labels must have colons")
+                                        .expect("labels must have colons after them")
                                         .0,
                                 ),
                                 match words.next() {
@@ -633,16 +714,23 @@ impl TSP50 {
                     }
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    pub fn assemble(&mut self, program: &str) {
+        // step 1: create AST
+        // todo: ugly and bad tokeniser might want to clean up
+        let ast: Vec<(Option<&str>, Directive)> = Self::make_ast(program);
 
         // Using a slicevec allows us to construct our assembled program in place.
-        let mut assembled = SliceVec::new(&mut self.rom);
+        let assembled = self.rom.as_mut_slice();
+        let mut rom_ptr: usize = 0;
         let mut labels: HashMap<&str, u16> = HashMap::new();
         let mut references: Vec<(&str, usize)> = Vec::new();
 
         for (label, directive) in ast {
             if let Some(l) = label {
-                if let Some(v) = labels.insert(l, assembled.len().try_into().unwrap()) {
+                if let Some(v) = labels.insert(l, rom_ptr as u16) {
                     panic!("label {v} used twice");
                 }
             }
@@ -650,17 +738,21 @@ impl TSP50 {
             let instruction = match directive {
                 Directive::I(i) => i,
                 Directive::Br(Some(i)) => {
-                    references.push((i, assembled.len()));
+                    references.push((i, rom_ptr as usize));
                     I::BR(Some(0x00))
                 }
                 _ => panic!("attempt to use directive with None label"),
             };
 
             match instruction.to_opcode() {
-                (i, None) => assembled.push(i).unwrap(),
+                (i, None) => {
+                    assembled[rom_ptr] = i;
+                    rom_ptr += 1;
+                }
                 (i, Some(o)) => {
-                    assembled.push(i).unwrap();
-                    assembled.push(o).unwrap()
+                    assembled[rom_ptr] = i;
+                    assembled[rom_ptr + 1] = o;
+                    rom_ptr += 2;
                 }
             }
         }
@@ -674,12 +766,77 @@ impl TSP50 {
     }
 
     pub fn run(&mut self) {
-        while !self.step() {
+        while self.step() == Status::Continue {
             println!("{:?}", self);
         }
     }
 
-    fn step(&mut self) -> bool {
+    fn handle_interrupts(&mut self) {
+        /* From the spec:
+         * Interrupts are not taken in the middle of double-byte instructions, during
+         * branch or call instructions, or during the subroutine or interrupt returns (RETN
+         * or RETI).
+         */
+        if matches!(self.rom[self.pc.value() as usize], 0x00..=0x0f | 0x1f | 0x3d | 0x3e | 0x40..=0x5f | 0x80..)
+        {
+            return;
+        }
+
+        match (
+            self.mode.contains(Mode::ENA1),
+            &self.interrupt_1.state,
+            self.mode.contains(Mode::ENA2),
+            &self.interrupt_2.state,
+        ) {
+            // Activate interrupt-1
+            (true, Interrupt::Requested, _, _) => {
+                self.interrupt_1 = Interrupt1 {
+                    state: Interrupt::Active,
+                    a: self.a,
+                    x: self.x,
+                    b: self.b,
+                    status: self.status,
+                    integer_mode: self.integer_mode,
+                };
+
+                self.stack.push(self.pc);
+
+                self.pc = match (self.mode.contains(Mode::PCM), self.mode.contains(Mode::LPC)) {
+                    (false, true) => u14::new(0x18),
+                    (false, false) => u14::new(0x1a),
+                    (true, true) => u14::new(0x1c),
+                    (true, false) => u14::new(0x1e),
+                };
+
+                if self.rom[self.pc.value() as usize] == 0x3e {
+                    panic!("from the spec: If a level-1 interrupt is followed immediately by a RETI, then the potential exists with some single-byte instructions to corrupt the A register upon return.")
+                }
+            }
+            // Prevent interrput-2 from activating if interrupt 1 is active
+            (_, Interrupt::Active, _, _) => (),
+            // Activate interrput-2
+            (_, Interrupt::Inactive, true, Interrupt::Requested) => {
+                self.interrupt_2 = Interrupt2 {
+                    state: Interrupt::Active,
+                    status: self.status,
+                    integer_mode: self.integer_mode,
+                };
+
+                self.stack.push(self.pc);
+
+                self.pc = match (self.mode.contains(Mode::PCM), self.mode.contains(Mode::LPC)) {
+                    (false, true) => u14::new(0x10),
+                    (false, false) => u14::new(0x12),
+                    (true, true) => u14::new(0x14),
+                    (true, false) => u14::new(0x16),
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn step(&mut self) -> Status {
+        self.handle_interrupts();
         let instruction = self.fetch();
         self.execute(instruction)
     }
@@ -790,10 +947,9 @@ impl TSP50 {
     }
 
     fn get_fetch_into_ps_buf(&mut self) {
-        let mode = self.mode.unwrap();
-        if mode.contains(Mode::RAMROM) {
+        if self.mode.contains(Mode::RAMROM) {
             self.ps_buf = OptUninit::Some(Some(self.read_mem_8(self.x.unwrap())));
-        } else if mode.contains(Mode::EXTROM) {
+        } else if self.mode.contains(Mode::EXTROM) {
             todo!("EXTROM is not yet supported");
         } else {
             self.ps_buf = OptUninit::Some(Some(self.rom[self.sar.unwrap().value() as usize]));
@@ -801,11 +957,11 @@ impl TSP50 {
         }
     }
 
-    fn execute(&mut self, instruction: Instruction) -> bool {
+    fn execute(&mut self, instruction: Instruction) -> Status {
         fn signed_shift_multiply(a: u14, b: u8) -> u14 {
             let a = a.value();
             assert!(a != 0x2000,
-                "When the A register contains the value 2000h, the results of the AXCA instruction are not reliable"
+                "from the spec: When the A register contains the value 2000h, the results of the AXCA instruction are not reliable"
             );
 
             // is 'a' negative?
@@ -1006,7 +1162,30 @@ impl TSP50 {
                 let mem = self.read_mem_8(addr);
                 self.write_mem_8(mem | operand, addr);
             }
-            I::RETI => todo!(),
+            I::RETI => {
+                match (self.mode.contains(Mode::ENA1), self.mode.contains(Mode::ENA2), &self.interrupt_1.state, &self.interrupt_2.state) {
+                    // Return from interrupt 1
+                    (_, _, Interrupt::Active, _) => {
+                        self.a = self.interrupt_1.a;
+                        self.x = self.interrupt_1.x;
+                        self.b = self.interrupt_1.b;
+                        self.status = self.interrupt_1.status;
+                        self.integer_mode = self.interrupt_1.integer_mode;
+                        self.pc = self.stack.pop();
+                    },
+                    // Return from interrupt 2
+                    (_, _, _, Interrupt::Active) => {
+                        self.status = self.interrupt_2.status;
+                        self.integer_mode = self.interrupt_2.integer_mode;
+                    },
+                    // If a RETI is executed with interrupts disabled, any interrupt pending flag is cleared.
+                    (false, false, _, _) => {
+                        self.interrupt_1.state = Interrupt::Inactive;
+                        self.interrupt_2.state = Interrupt::Inactive;
+                    },
+                    _ => panic!("From the spec: If a RETI instruction is executed with interrupts enabled and without an interrupt first occurring, the stack control can be corrupted.")
+                }
+            }
             I::RETN => {
                 self.set_status(true);
                 if self.stack.sp != StackPointer::Bottom {
@@ -1051,39 +1230,161 @@ impl TSP50 {
                     }
                 }
             }
-            I::SETOFF => return true,
-            I::SMAAN => todo!(),
-            I::TAB => todo!(),
-            I::TAM => todo!(),
-            I::TAMD(_) => todo!(),
-            I::TAMIX => todo!(),
+            I::SETOFF => return Status::Halt,
+            I::SMAAN => {
+                let a = self.a.unwrap();
+                let mem = self.read_mem_sign_extend(self.x.unwrap());
+                self.set_status((a.value() as u8) < (mem.value() as u8));
+                self.a = OptUninit::Some(a.wrapping_sub(mem));
+            }
+            I::TAB => {
+                self.set_status(true);
+                self.b = self.a;
+            }
+            I::TAM => {
+                self.set_status(true);
+                self.write_mem(self.a.unwrap(), self.x.unwrap());
+            }
+            I::TAMD(Some(operand)) => {
+                self.set_status(true);
+                self.write_mem(self.a.unwrap(), operand);
+            }
+            I::TAMIX => {
+                self.set_status(true);
+                self.write_mem(self.a.unwrap(), self.x.unwrap());
+                self.x = OptUninit::Some(self.x.unwrap().wrapping_add(1));
+            }
             I::TAMODE => {
                 self.set_status(true);
-                self.mode =
-                    OptUninit::Some(Mode::from_bits(self.a.unwrap().value() as u8).unwrap());
+                self.mode = Mode::from_bits(self.a.unwrap().value() as u8).unwrap();
             }
-            I::TAPSC => todo!(),
-            I::TASYN => todo!(),
-            I::TATM => todo!(),
-            I::TAX => todo!(),
-            I::TBM => todo!(),
-            I::TCA(_) => todo!(),
-            I::TCX(_) => todo!(),
-            I::TMA => todo!(),
-            I::TMAD(_) => todo!(),
-            I::TMAIX => todo!(),
-            I::TMXD(_) => todo!(),
-            I::TRNDA => todo!(),
-            I::TSTCA(_) => todo!(),
-            I::TSTCM(_) => todo!(),
-            I::TTMA => todo!(),
-            I::TXA => todo!(),
-            I::XBA => todo!(),
-            I::XBX => todo!(),
-            I::XGEC(_) => todo!(),
+            I::TAPSC => {
+                self.set_status(true);
+                self.timer_prescale = OptUninit::Some(self.a.unwrap().value() as u8);
+            }
+            I::TASYN => {
+                self.set_status(true);
+                let a = self.a.unwrap();
+                match (self.mode.contains(Mode::LPC), self.mode.contains(Mode::PCM)) {
+                    (false, true) => {
+                        // See section 6.10 of the spec as for why this algorithm is insane
+                        let dac = a.value() >> 2;
+                        self.dac = OptUninit::Some(
+                            ((if dac & 0xC00 == 0xC00 { -1 } else { 1 })
+                                * (((dac & 1) + ((dac & 0xFF) >> 1)) as i16))
+                                .clamp(-480, 480),
+                        );
+                    }
+                    (true, false) | (false, false) => {
+                        assert!(a.value() & 0b10_0000_0000_0001 == 0, "From the spec: When in LPC mode, MSB and LSB of A register must be set to zero upon TASYN");
+                        self.pitch = self.a;
+                    }
+                    (true, true) => self.excitation = self.a,
+                }
+            }
+            I::TATM => {
+                self.set_status(true);
+                self.timer = OptUninit::Some(self.a.unwrap().value() as u8);
+            }
+            I::TAX => {
+                self.set_status(true);
+                self.x = OptUninit::Some(self.a.unwrap().value() as u8);
+            }
+            I::TBM => {
+                self.set_status(true);
+                self.write_mem(self.b.unwrap(), self.x.unwrap());
+            }
+            I::TCA(Some(operand)) => {
+                self.set_status(true);
+                self.a = OptUninit::Some(self.sign_extend_8_to_14_if_extended_sign(operand));
+            }
+            I::TCX(Some(operand)) => {
+                self.set_status(true);
+                self.x = OptUninit::Some(operand);
+            }
+            I::TMA => {
+                self.set_status(true);
+                self.a = OptUninit::Some(self.read_mem_sign_extend(self.x.unwrap()));
+            }
+            I::TMAD(Some(operand)) => {
+                self.set_status(true);
+                self.a = OptUninit::Some(self.read_mem_sign_extend(operand));
+            }
+            I::TMAIX => {
+                self.set_status(true);
+                self.a = OptUninit::Some(self.read_mem_sign_extend(self.x.unwrap()));
+                self.x = OptUninit::Some(self.x.unwrap().wrapping_add(1));
+            }
+            I::TMXD(Some(operand)) => {
+                self.set_status(true);
+                self.x = OptUninit::Some(self.read_mem_8(operand));
+            }
+            I::TRNDA => {
+                self.set_status(true);
+                self.a = OptUninit::Some(u14::new(self.random & 0xFF))
+            }
+            I::TSTCA(Some(operand)) => {
+                self.set_status(self.a.unwrap().value() as u8 & operand == operand)
+            }
+            I::TSTCM(Some(operand)) => {
+                let status = self.read_mem_8(self.x.unwrap()) & operand == operand;
+                self.set_status(status)
+            }
+            I::TTMA => {
+                self.set_status(true);
+                self.a =
+                    OptUninit::Some(self.sign_extend_8_to_14_if_extended_sign(self.timer.unwrap()));
+            }
+            I::TXA => {
+                self.set_status(true);
+                self.a =
+                    OptUninit::Some(self.sign_extend_8_to_14_if_extended_sign(self.x.unwrap()));
+            }
+            I::XBA => {
+                self.set_status(true);
+                std::mem::swap(&mut self.a, &mut self.b);
+            }
+            I::XBX => {
+                self.set_status(true);
+                let b = self.b.unwrap();
+                let x = self.x.unwrap();
+
+                self.x = OptUninit::Some(b.value() as u8);
+                self.b = OptUninit::Some(self.sign_extend_8_to_14_if_extended_sign(x));
+            }
+            I::XGEC(Some(operand)) => {
+                self.set_status(self.x.unwrap() > operand);
+            }
             _ => panic!("attempt to use opcode with None operand"),
+        };
+
+        let cycles = instruction.cycles();
+        self.num_cycles += cycles;
+
+        if self.timer_begun {
+            let timer_prescale = self.timer_prescale.unwrap() as usize;
+            let (timer_prescale_count, overflow) = (self.timer_prescale_count.unwrap() as usize
+                + cycles)
+                .overflowing_rem(timer_prescale + 1);
+
+            self.timer_prescale_count = OptUninit::Some(timer_prescale_count as u8);
+
+            if overflow {
+                let (timer, interrupt) = self.timer.unwrap().overflowing_sub(1);
+                self.timer = OptUninit::Some(timer);
+                if interrupt {
+                    self.interrupt_2.state = Interrupt::Requested;
+                }
+            }
         }
-        false
+
+        for _ in 0..cycles {
+            // update random number generator once for each clock cycle
+            self.random =
+                (self.random << 1) | (self.random & 0x4000 == self.random & 0x2000) as u16;
+        }
+
+        Status::Continue
     }
 }
 
