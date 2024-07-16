@@ -7,6 +7,7 @@
 
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
+use slicevec::SliceVec;
 use std::{
     collections::HashMap,
     fmt::{self, Debug},
@@ -85,6 +86,8 @@ enum Instruction {
 enum Directive<'a> {
     I(Instruction),
     Br(Option<&'a str>),
+    Aorg(Option<usize>),
+    Byte(Option<u8>),
 }
 
 type I = Instruction;
@@ -95,68 +98,70 @@ impl TryFrom<&str> for Directive<'_> {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "CALL" => Ok(D::I(I::CALL(None))),
-            "TXA" => Ok(D::I(I::TXA)),
-            "TMA" => Ok(D::I(I::TMA)),
-            "XBA" => Ok(D::I(I::XBA)),
-            "TAMIX" => Ok(D::I(I::TAMIX)),
-            "TMAIX" => Ok(D::I(I::TMAIX)),
-            "SARA" => Ok(D::I(I::SARA)),
-            "TAM" => Ok(D::I(I::TAM)),
-            "TTMA" => Ok(D::I(I::TTMA)),
-            "TAX" => Ok(D::I(I::TAX)),
-            "TAPSC" => Ok(D::I(I::TAPSC)),
-            "TAB" => Ok(D::I(I::TAB)),
-            "SALA4" => Ok(D::I(I::SALA4)),
-            "TASYN" => Ok(D::I(I::TASYN)),
-            "TAMODE" => Ok(D::I(I::TAMODE)),
-            "TATM" => Ok(D::I(I::TATM)),
-            "BRA" => Ok(D::I(I::BRA)),
-            "CLX" => Ok(D::I(I::CLX)),
-            "IXC" => Ok(D::I(I::IXC)),
-            "DECXN" => Ok(D::I(I::DECXN)),
-            "XBX" => Ok(D::I(I::XBX)),
-            "CLB" => Ok(D::I(I::CLB)),
-            "IBC" => Ok(D::I(I::IBC)),
-            "INCMC" => Ok(D::I(I::INCMC)),
-            "DECMN" => Ok(D::I(I::DECMN)),
-            "AMAAC" => Ok(D::I(I::AMAAC)),
-            "SMAAN" => Ok(D::I(I::SMAAN)),
-            "TBM" => Ok(D::I(I::TBM)),
-            "TRNDA" => Ok(D::I(I::TRNDA)),
-            "ABAAC" => Ok(D::I(I::ABAAC)),
-            "SBAAN" => Ok(D::I(I::SBAAN)),
-            "SALA" => Ok(D::I(I::SALA)),
-            "CLA" => Ok(D::I(I::CLA)),
-            "GET" => Ok(D::I(I::GET(None))),
-            "AXTM" => Ok(D::I(I::AXTM)),
-            "AXMA" => Ok(D::I(I::AXMA)),
-            "IAC" => Ok(D::I(I::IAC)),
-            "INTGR" => Ok(D::I(I::INTGR)),
-            "EXTSG" => Ok(D::I(I::EXTSG)),
-            "RETN" => Ok(D::I(I::RETN)),
-            "RETI" => Ok(D::I(I::RETI)),
-            "SETOFF" => Ok(D::I(I::SETOFF)),
-            "BR" => Ok(D::I(I::BR(None))),
-            "ANEC" => Ok(D::I(I::ANEC(None))),
-            "XGEC" => Ok(D::I(I::XGEC(None))),
-            "TCX" => Ok(D::I(I::TCX(None))),
-            "AGEC" => Ok(D::I(I::AGEC(None))),
-            "ORCM" => Ok(D::I(I::ORCM(None))),
-            "ANDCM" => Ok(D::I(I::ANDCM(None))),
-            "TSTCM" => Ok(D::I(I::TSTCM(None))),
-            "TSTCA" => Ok(D::I(I::TSTCA(None))),
-            "AXCA" => Ok(D::I(I::AXCA(None))),
-            "TMAD" => Ok(D::I(I::TMAD(None))),
-            "TAMD" => Ok(D::I(I::TAMD(None))),
-            "LUAA" => Ok(D::I(I::LUAA)),
-            "LUAPS" => Ok(D::I(I::LUAPS)),
-            "LUAB" => Ok(D::I(I::LUAB)),
-            "TCA" => Ok(D::I(I::TCA(None))),
-            "TMXD" => Ok(D::I(I::TMXD(None))),
-            "ACAAC" => Ok(D::I(I::ACAAC(None))),
-            "SBR" => Ok(D::I(I::SBR(None))),
-            "Br" => Ok(D::Br(None)),
+            "call" => Ok(D::I(I::CALL(None))),
+            "txa" => Ok(D::I(I::TXA)),
+            "tma" => Ok(D::I(I::TMA)),
+            "xba" => Ok(D::I(I::XBA)),
+            "tamix" => Ok(D::I(I::TAMIX)),
+            "tmaix" => Ok(D::I(I::TMAIX)),
+            "sara" => Ok(D::I(I::SARA)),
+            "tam" => Ok(D::I(I::TAM)),
+            "ttma" => Ok(D::I(I::TTMA)),
+            "tax" => Ok(D::I(I::TAX)),
+            "tapsc" => Ok(D::I(I::TAPSC)),
+            "tab" => Ok(D::I(I::TAB)),
+            "sala4" => Ok(D::I(I::SALA4)),
+            "tasyn" => Ok(D::I(I::TASYN)),
+            "tamode" => Ok(D::I(I::TAMODE)),
+            "tatm" => Ok(D::I(I::TATM)),
+            "bra" => Ok(D::I(I::BRA)),
+            "clx" => Ok(D::I(I::CLX)),
+            "ixc" => Ok(D::I(I::IXC)),
+            "decxn" => Ok(D::I(I::DECXN)),
+            "xbx" => Ok(D::I(I::XBX)),
+            "clb" => Ok(D::I(I::CLB)),
+            "ibc" => Ok(D::I(I::IBC)),
+            "incmc" => Ok(D::I(I::INCMC)),
+            "decmn" => Ok(D::I(I::DECMN)),
+            "amaac" => Ok(D::I(I::AMAAC)),
+            "smaan" => Ok(D::I(I::SMAAN)),
+            "tbm" => Ok(D::I(I::TBM)),
+            "trnda" => Ok(D::I(I::TRNDA)),
+            "abaac" => Ok(D::I(I::ABAAC)),
+            "sbaan" => Ok(D::I(I::SBAAN)),
+            "sala" => Ok(D::I(I::SALA)),
+            "cla" => Ok(D::I(I::CLA)),
+            "get" => Ok(D::I(I::GET(None))),
+            "axtm" => Ok(D::I(I::AXTM)),
+            "axma" => Ok(D::I(I::AXMA)),
+            "iac" => Ok(D::I(I::IAC)),
+            "intgr" => Ok(D::I(I::INTGR)),
+            "extsg" => Ok(D::I(I::EXTSG)),
+            "retn" => Ok(D::I(I::RETN)),
+            "reti" => Ok(D::I(I::RETI)),
+            "setoff" => Ok(D::I(I::SETOFF)),
+            "br" => Ok(D::I(I::BR(None))),
+            "anec" => Ok(D::I(I::ANEC(None))),
+            "xgec" => Ok(D::I(I::XGEC(None))),
+            "tcx" => Ok(D::I(I::TCX(None))),
+            "agec" => Ok(D::I(I::AGEC(None))),
+            "orcm" => Ok(D::I(I::ORCM(None))),
+            "andcm" => Ok(D::I(I::ANDCM(None))),
+            "tstcm" => Ok(D::I(I::TSTCM(None))),
+            "tstca" => Ok(D::I(I::TSTCA(None))),
+            "axca" => Ok(D::I(I::AXCA(None))),
+            "tmad" => Ok(D::I(I::TMAD(None))),
+            "tamd" => Ok(D::I(I::TAMD(None))),
+            "luaa" => Ok(D::I(I::LUAA)),
+            "luaps" => Ok(D::I(I::LUAPS)),
+            "luab" => Ok(D::I(I::LUAB)),
+            "tca" => Ok(D::I(I::TCA(None))),
+            "tmxd" => Ok(D::I(I::TMXD(None))),
+            "acaac" => Ok(D::I(I::ACAAC(None))),
+            "sbr" => Ok(D::I(I::SBR(None))),
+            "BR" => Ok(D::Br(None)),
+            "AORG" => Ok(D::Aorg(None)),
+            "BYTE" => Ok(D::Byte(None)),
             _ => Err(()),
         }
     }
@@ -649,21 +654,31 @@ impl TSP50 {
     }
 
     fn make_ast(program: &str) -> Vec<(Option<&str>, Directive)> {
+        fn parse_number<'a>(literal: &'a str) -> usize {
+            if literal.starts_with('#') {
+                usize::from_str_radix(&literal[1..], 16)
+            } else {
+                usize::from_str(literal)
+            }
+            .expect("failed to parse literal")
+        }
+
         fn attatch_operand_to_directive<'a>(
             directive: Directive<'a>,
             operand: &'a str,
         ) -> Directive<'a> {
             match directive {
                 D::I(i) => {
-                    let operand: usize = if operand.starts_with('#') {
-                        usize::from_str_radix(&operand[1..], 16)
-                    } else {
-                        usize::from_str(operand)
-                    }
-                    .expect("failed to parse literal");
+                    let operand: usize = parse_number(&operand);
                     D::I(i.set_operand_value(operand))
                 }
                 D::Br(_) => D::Br(Some(operand)),
+                D::Aorg(_) => D::Aorg(Some(parse_number(&operand))),
+                D::Byte(_) => D::Byte(Some(
+                    parse_number(&operand)
+                        .try_into()
+                        .expect("BYTE must be between #00 and #FF"),
+                )),
             }
         }
 
@@ -723,37 +738,50 @@ impl TSP50 {
         let ast: Vec<(Option<&str>, Directive)> = Self::make_ast(program);
 
         // Using a slicevec allows us to construct our assembled program in place.
-        let assembled = self.rom.as_mut_slice();
-        let mut rom_ptr: usize = 0;
+        let mut assembled = SliceVec::new(&mut self.rom);
         let mut labels: HashMap<&str, u16> = HashMap::new();
         let mut references: Vec<(&str, usize)> = Vec::new();
 
         for (label, directive) in ast {
             if let Some(l) = label {
-                if let Some(v) = labels.insert(l, rom_ptr as u16) {
+                if let Some(v) = labels.insert(l, assembled.len() as u16) {
                     panic!("label {v} used twice");
                 }
             }
 
-            let instruction = match directive {
-                Directive::I(i) => i,
+            fn write_opcode(instruction: &Instruction, assembled: &mut SliceVec<u8>) {
+                match instruction.to_opcode() {
+                    (i, None) => {
+                        assembled.push(i).unwrap();
+                    }
+                    (i, Some(o)) => {
+                        assembled.push(i).unwrap();
+                        assembled.push(o).unwrap();
+                    }
+                }
+            }
+
+            match directive {
+                Directive::I(i) => write_opcode(&i, &mut assembled),
                 Directive::Br(Some(i)) => {
-                    references.push((i, rom_ptr as usize));
-                    I::BR(Some(0x00))
+                    references.push((i, assembled.len()));
+
+                    write_opcode(&I::BR(Some(0)), &mut assembled);
+                }
+                Directive::Aorg(Some(i)) => {
+                    assert!(
+                        assembled.len() <= i,
+                        "AORG directive must leave rom strictly increasing"
+                    );
+                    // gross, fix later
+                    for _ in assembled.len()..i {
+                        assembled.push(0).unwrap();
+                    }
+                }
+                Directive::Byte(Some(i)) => {
+                    assembled.push(i).unwrap();
                 }
                 _ => panic!("attempt to use directive with None label"),
-            };
-
-            match instruction.to_opcode() {
-                (i, None) => {
-                    assembled[rom_ptr] = i;
-                    rom_ptr += 1;
-                }
-                (i, Some(o)) => {
-                    assembled[rom_ptr] = i;
-                    assembled[rom_ptr + 1] = o;
-                    rom_ptr += 2;
-                }
             }
         }
 
@@ -1392,11 +1420,21 @@ fn main() {
     let mut emulator = TSP50::new();
 
     let mut program = String::new();
-    File::open("src/test.asm")
+    File::open("src/test.tsp")
         .unwrap()
         .read_to_string(&mut program)
         .unwrap();
     emulator.assemble(&program);
+
+    for i in 0..8 {
+        println!(
+            "{}",
+            &emulator.rom[0x10 * i..(0x10 * (i + 1))]
+                .iter()
+                .map(|x| format!("{x:02x} "))
+                .collect::<String>()
+        );
+    }
 
     emulator.run();
 }
