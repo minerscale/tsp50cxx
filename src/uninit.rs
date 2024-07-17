@@ -47,7 +47,7 @@ impl<T: Clone + Debug + Default> Debug for Uninit<T> {
 
 #[cfg(not(debug_assertions))]
 #[derive(Copy, Clone)]
-enum OptUninit<T> {
+pub enum Uninit<T> {
     Some(T),
 }
 

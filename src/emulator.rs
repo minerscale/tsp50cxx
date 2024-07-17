@@ -489,8 +489,7 @@ impl TSP50 {
             }
             I::AXTM => {
                 self.set_status(true);
-                self.a =
-                    Uninit::Some(signed_shift_multiply(self.a.unwrap(), self.timer.unwrap()));
+                self.a = Uninit::Some(signed_shift_multiply(self.a.unwrap(), self.timer.unwrap()));
             }
             I::BR(Some(operand)) => {
                 if self.status.unwrap() {
@@ -804,8 +803,7 @@ impl TSP50 {
             }
             I::TXA => {
                 self.set_status(true);
-                self.a =
-                    Uninit::Some(self.sign_extend_8_to_14_if_extended_sign(self.x.unwrap()));
+                self.a = Uninit::Some(self.sign_extend_8_to_14_if_extended_sign(self.x.unwrap()));
             }
             I::XBA => {
                 self.set_status(true);

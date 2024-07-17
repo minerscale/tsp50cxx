@@ -1,23 +1,23 @@
-use std::fmt::Write;
+use std::{fmt::Write, process::ExitCode};
 mod assembler;
 mod emulator;
 mod instruction;
 mod uninit;
 
 use assembler::assemble;
-use std::{fs::File, io::Read};
 
 use crate::emulator::TSP50;
 
-fn main() {
+fn main() -> ExitCode {
     let mut emulator = TSP50::new();
 
-    let mut program = String::new();
-    File::open("src/test.tsp")
-        .unwrap()
-        .read_to_string(&mut program)
-        .unwrap();
-    assemble(&program, emulator.rom_mut());
+    match assemble("src/test.tsp", emulator.rom_mut()) {
+        Err(s) => {
+            println!("{s}");
+            return ExitCode::from(1);
+        }
+        _ => (),
+    }
 
     for i in 0..8 {
         println!(
@@ -32,4 +32,6 @@ fn main() {
     }
 
     emulator.run();
+
+    ExitCode::SUCCESS
 }
