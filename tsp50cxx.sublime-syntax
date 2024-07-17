@@ -1,0 +1,47 @@
+%YAML 1.2
+---
+# See http://www.sublimetext.com/docs/syntax.html
+file_extensions:
+  - tsp
+scope: source.tsp
+version: 2
+contexts:
+  main:
+    # Comments begin with a '//' and finish at the end of the line
+    - match: '%'
+      scope: punctuation.definition.comment.tsp
+      push: line_comment
+
+    - match: '"'
+      scope: string.tsp
+      push:  string
+
+    - match: '\b[a-z]+:\b'
+      scope: meta.label.global.tsp
+
+    - match: '\b(call|txa|tma|xba|tamix|tmaix|sara|tam|ttma|tax|tapsc|tab|sala4|tasyn|tamode|tatm|bra|clx|ixc|decxn|xbx|clb|ibc|incmc|decmn|amaac|smaan|tbm|trnda|abaac|sbaan|sala|cla|get|axtm|axma|iac|intgr|extsg|retn|reti|setoff|br|anec|xgec|tcx|agec|orcm|andcm|tstcm|tstca|axca|tmad|tamd|luaa|luaps|luab|tca|tmxd|acaac|sbr)\b'
+      scope: keyword.control.tsp
+
+    - match: '\b(BR|AORG|BYTE|DATA|TEXT)\b'
+      scope: keyword.control.tsp
+
+    # Numbers
+    - match: '#\b([0-9a-fA-F]+)\b'
+      captures:
+        1: constant.numeric.integer.hexadecimal.tsp
+
+    - match: '\b([0-9]+)\b'
+      scope: constant.numeric.integer.decimal.tsp
+
+    - match: '\b([a-z]+)\b[^:]'
+      scope: variable.tsp
+    
+  line_comment:
+    - meta_scope: comment.line.tsp
+    - match: $
+      pop: true
+
+  string:
+    - meta_scope: string.tsp
+    - match: '"'
+      pop: true
