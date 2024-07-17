@@ -7,13 +7,16 @@
 
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
+use inline_colorization::*;
 use slicevec::SliceVec;
+use unicode_width::UnicodeWidthStr;
 use std::{
     collections::HashMap,
-    fmt::{self, Debug},
+    fmt::{self, Debug, Write},
     fs::File,
     io::Read,
     ops::{Index, IndexMut},
+    process::exit,
     str::FromStr,
 };
 
@@ -82,12 +85,14 @@ enum Instruction {
     SBR(Option<u8>),
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 enum Directive<'a> {
     I(Instruction),
     Br(Option<&'a str>),
     Aorg(Option<usize>),
-    Byte(Option<u8>),
+    Byte(Option<Vec<u8>>),
+    Data(Option<Vec<u16>>),
+    Text(Option<&'a str>),
 }
 
 type I = Instruction;
@@ -162,6 +167,8 @@ impl TryFrom<&str> for Directive<'_> {
             "BR" => Ok(D::Br(None)),
             "AORG" => Ok(D::Aorg(None)),
             "BYTE" => Ok(D::Byte(None)),
+            "DATA" => Ok(D::Data(None)),
+            "TEXT" => Ok(D::Text(None)),
             _ => Err(()),
         }
     }
@@ -654,82 +661,185 @@ impl TSP50 {
     }
 
     fn make_ast(program: &str) -> Vec<(Option<&str>, Directive)> {
-        fn parse_number<'a>(literal: &'a str) -> usize {
-            if literal.starts_with('#') {
-                usize::from_str_radix(&literal[1..], 16)
+        #[derive(Debug)]
+        struct SyntaxError<'a> {
+            msg: &'a str,
+            slice: &'a str,
+        }
+
+        fn parse_number(literal: &str) -> Result<usize, SyntaxError> {
+            if let Some(hex) = literal.strip_prefix('#') {
+                usize::from_str_radix(hex, 16)
             } else {
                 usize::from_str(literal)
             }
-            .expect("failed to parse literal")
+            .map_err(|_| SyntaxError {
+                msg: "failed to parse number",
+                slice: literal,
+            })
         }
 
-        fn attatch_operand_to_directive<'a>(
+        fn parse_argument<'a>(
+            label: Option<&'a str>,
             directive: Directive<'a>,
-            operand: &'a str,
-        ) -> Directive<'a> {
-            match directive {
-                D::I(i) => {
-                    let operand: usize = parse_number(&operand);
-                    D::I(i.set_operand_value(operand))
+            line: &'a str,
+        ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
+            match match line
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map_or(Ok(None), |(idx, c)| match c {
+                    '"' => {
+                        let err = || {
+                            Err(SyntaxError {
+                                msg: "no closing double quote",
+                                slice: &line[idx..],
+                            })
+                        };
+                        line[idx..]
+                            .char_indices()
+                            .nth(2)
+                            .map_or(err(), |(next_idx, _)| {
+                                line[(idx + next_idx)..].find('"').map_or(err(), |end| {
+                                    Ok(Some(&line[(idx + next_idx)..(idx + next_idx + end)]))
+                                })
+                            })
+                    }
+                    '%' => Ok(None),
+                    _ => {
+                        let end_idx = line[idx..]
+                            .find('%')
+                            .map_or(&line[idx..], |x| &line[idx..(idx + x)])
+                            .rfind(|c: char| !c.is_whitespace())
+                            .unwrap();
+
+                        Ok(Some(
+                            line[idx + end_idx..]
+                                .char_indices()
+                                .nth(2)
+                                .map_or(&line[idx..], |(next_idx, _)| {
+                                    &line[idx..(idx + end_idx + next_idx - 1)]
+                                }),
+                        ))
+                    }
+                }) {
+                Ok(Some(arg)) => match directive {
+                    D::I(i) => parse_number(arg).map(|x| D::I(i.set_operand_value(x))),
+                    D::Br(_) => Ok(D::Br(Some(arg))),
+                    D::Aorg(_) => parse_number(arg).map(|x| D::Aorg(Some(x))),
+                    D::Byte(_) => arg
+                        .split(',')
+                        .map(|s| match parse_number(s) {
+                            Ok(x) => u8::try_from(x).map_err(|_| SyntaxError {
+                                msg: "BYTE must be between #00 and #FF",
+                                slice: arg,
+                            }),
+                            Err(e) => Err(e),
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|x| D::Byte(Some(x))),
+                    D::Data(_) => arg
+                        .split(',')
+                        .map(|s| match parse_number(s) {
+                            Ok(x) => u16::try_from(x).map_err(|_| SyntaxError {
+                                msg: "DATA must be between #0000 and #FFFF",
+                                slice: arg,
+                            }),
+                            Err(e) => Err(e),
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|x| D::Data(Some(x))),
+                    D::Text(_) => Ok(D::Text(Some(arg))),
+                },
+                Ok(None) => Ok(directive),
+                Err(e) => Err(e),
+            } {
+                Ok(directive) => Some(Ok((label, directive))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        fn parse_keyword_or_label<'a>(
+            label: Option<&'a str>,
+            line: &'a str,
+        ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
+            let get_directive = |s| match Directive::try_from(s) {
+                Ok(d) => Some(Ok((label, d))),
+                Err(_) => Some(Err(SyntaxError {
+                    msg: "directive not recognised",
+                    slice: s,
+                })),
+            };
+
+            match line
+                .char_indices()
+                .find(|(_, c)| c.is_whitespace() || matches!(c, ':' | '%'))
+            {
+                Some((idx, c)) => {
+                    match c {
+                        // Label
+                        ':' => line[idx..].char_indices().nth(1).map_or(
+                            Some(Err(SyntaxError {
+                                msg: "expected directive after label",
+                                slice: &line[idx..],
+                            })),
+                            |(after_colon, _)| {
+                                parse_main(Some(&line[..idx]), &line[(idx + after_colon)..])
+                            },
+                        ),
+                        // Comment delimiter
+                        '%' => get_directive(&line[..idx]),
+                        // Keyword, get operand and strip whitespace on both sides
+                        _ => match Directive::try_from(&line[..idx]) {
+                            Ok(d) => parse_argument(label, d, &line[idx..]),
+                            Err(_) => Some(Err(SyntaxError {
+                                msg: "directive not recognised",
+                                slice: &line[..idx],
+                            })),
+                        },
+                    }
                 }
-                D::Br(_) => D::Br(Some(operand)),
-                D::Aorg(_) => D::Aorg(Some(parse_number(&operand))),
-                D::Byte(_) => D::Byte(Some(
-                    parse_number(&operand)
-                        .try_into()
-                        .expect("BYTE must be between #00 and #FF"),
-                )),
+                None => get_directive(line),
+            }
+        }
+
+        fn parse_main<'a>(
+            label: Option<&'a str>,
+            line: &'a str,
+        ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
+            match line.find(|c: char| !c.is_whitespace()) {
+                Some(idx) => parse_keyword_or_label(label, &line[idx..]),
+                None => None,
             }
         }
 
         program
             .lines()
-            .filter_map(|line| {
-                // Comment delimiter
-                let line = match line.split_once('%') {
-                    Some(x) => x.0,
-                    None => line,
-                };
-
-                let mut words = line.split_whitespace();
-
-                let first_word = match words.next() {
-                    Some(x) => x,
-                    None => return None,
-                };
-
-                Some(match Directive::try_from(first_word) {
-                    Ok(directive) => (
-                        None,
-                        match words.next() {
-                            Some(operand) => attatch_operand_to_directive(directive, operand),
-                            None => directive,
-                        },
-                    ),
-                    Err(_) => {
-                        match Directive::try_from(words.next().expect("label with no opcode")) {
-                            Ok(directive) => (
-                                Some(
-                                    first_word
-                                        .rsplit_once(':')
-                                        .expect("labels must have colons after them")
-                                        .0,
-                                ),
-                                match words.next() {
-                                    Some(operand) => {
-                                        attatch_operand_to_directive(directive, operand)
-                                    }
-                                    None => directive,
-                                },
-                            ),
-                            Err(_) => {
-                                panic!("a directive needs to immediately follow a label")
-                            }
-                        }
-                    }
-                })
+            .enumerate()
+            .filter_map(|(line_number, line)| {
+                parse_main(None, line).map(|x| x.map_err(|e| (line, line_number, e)))
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|(line, line_number, e)| {
+                // In any other language this wouldn't be hacky
+                let column: usize =
+                    e.slice.as_bytes().as_ptr_range().start as usize - line.as_ptr() as usize;
+
+                let padding = line_number.to_string().len();
+                let pad_str = " ".repeat(padding);
+
+                println!("{style_bold}{color_red}error{color_reset}: {}", e.msg);
+                println!(
+                    "{pad_str}{color_blue}-->{color_reset}{style_reset} {line_number}:{column}"
+                );
+                println!(" {pad_str}{style_bold}{color_blue}|");
+                println!("{line_number} |{color_reset}{style_reset}{line}");
+                println!(
+                    " {pad_str}{style_bold}{color_blue}|{color_red}{}{color_reset}{style_reset}",
+                    " ".repeat(line[..column].width()) + &("^".repeat(e.slice.width()))
+                );
+
+                exit(1)
+            })
     }
 
     pub fn assemble(&mut self, program: &str) {
@@ -779,7 +889,20 @@ impl TSP50 {
                     }
                 }
                 Directive::Byte(Some(i)) => {
-                    assembled.push(i).unwrap();
+                    for byte in i {
+                        assembled.push(byte).unwrap();
+                    }
+                }
+                Directive::Data(Some(i)) => {
+                    for word in i {
+                        assembled.push((word >> 8) as u8).unwrap();
+                        assembled.push(word as u8).unwrap();
+                    }
+                }
+                Directive::Text(Some(i)) => {
+                    for &byte in i.as_bytes() {
+                        assembled.push(byte).unwrap();
+                    }
                 }
                 _ => panic!("attempt to use directive with None label"),
             }
@@ -1431,8 +1554,10 @@ fn main() {
             "{}",
             &emulator.rom[0x10 * i..(0x10 * (i + 1))]
                 .iter()
-                .map(|x| format!("{x:02x} "))
-                .collect::<String>()
+                .fold(String::new(), |mut s, x| {
+                    let _ = write!(s, "{x:02x} ");
+                    s
+                })
         );
     }
 
