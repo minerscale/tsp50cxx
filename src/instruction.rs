@@ -84,10 +84,18 @@ impl<'a> Expr<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub enum BinaryOpType {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expression<'a> {
     Symbol(Rc<str>),
     Literal(usize),
-    Add(Box<(Expr<'a>, Expr<'a>)>),
+    BinaryOp((BinaryOpType, Box<(Expr<'a>, Expr<'a>)>)),
 }
 
 #[derive(Debug, Clone)]

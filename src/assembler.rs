@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::{borrow::Borrow, collections::HashMap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::instruction::{Directive, Expr, Expression, Instruction, D};
+use crate::instruction::{BinaryOpType, Directive, Expr, Expression, Instruction, D};
 use inline_colorization::*;
 
 #[derive(Debug)]
@@ -39,22 +39,38 @@ fn strip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
     lstrip_whitespace(value).and_then(|x| rstrip_whitespace(x))
 }
 
+fn split_order_of_operations<'a>(value: &'a str) -> Option<(BinaryOpType, (&'a str, &'a str))> {
+    value
+        .split_once('*')
+        .map(|x| (BinaryOpType::Mul, x))
+        .or(value
+            .split_once('/')
+            .map(|x| (BinaryOpType::Div, x))
+            .or(value
+                .split_once('+')
+                .map(|x| (BinaryOpType::Add, x))
+                .or(value.split_once('-').map(|x| (BinaryOpType::Sub, x)))))
+}
+
 fn make_ast<'a>(
     source: &'a [&'a str],
 ) -> Result<Vec<(Option<&'a str>, Option<Directive<'a>>)>, SyntaxError<'a>> {
     fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
-        match literal.split_once('+') {
-            Some((left, right)) => Ok(Expr::new(
-                Expression::Add(Box::new((
-                    parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
-                        msg: vec!["must have expression left of '+' operator"],
-                        slice: left,
-                    })?)?,
-                    parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
-                        msg: vec!["must have expression right of '+' operator"],
-                        slice: right,
-                    })?)?,
-                ))),
+        match split_order_of_operations(literal) {
+            Some((op, (left, right))) => Ok(Expr::new(
+                Expression::BinaryOp((
+                    op,
+                    Box::new((
+                        parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
+                            msg: vec!["must have expression left of '+' operator"],
+                            slice: left,
+                        })?)?,
+                        parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
+                            msg: vec!["must have expression right of '+' operator"],
+                            slice: right,
+                        })?)?,
+                    )),
+                )),
                 Some(literal),
             )),
             None => match if let Some(hex) = literal.strip_prefix('#') {
@@ -338,16 +354,19 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                 if let Some(e) = symbols.insert(
                     l,
                     Expr::new(
-                        Expression::Add(Box::new((
-                            Expr::new(
-                                Expression::Symbol(segments.last().unwrap().label.clone()),
-                                Some(l),
-                            ),
-                            Expr::new(
-                                Expression::Literal(segments.last().unwrap().assembled.len()),
-                                Some(l),
-                            ),
-                        ))),
+                        Expression::BinaryOp((
+                            BinaryOpType::Add,
+                            Box::new((
+                                Expr::new(
+                                    Expression::Symbol(segments.last().unwrap().label.clone()),
+                                    Some(l),
+                                ),
+                                Expr::new(
+                                    Expression::Literal(segments.last().unwrap().assembled.len()),
+                                    Some(l),
+                                ),
+                            )),
+                        )),
                         None,
                     ),
                 ) {
@@ -474,19 +493,41 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
             Expression::Literal(x) => Ok(*x),
             Expression::Symbol(s) => match symbols.get(s.as_ref()) {
                 Some(ref sym) => resolve_expression(&sym, symbols),
-                None => Err(("symbol not found", s)),
+                None => Err(("symbol not found", expression.debug.expect("no debug info"))),
             },
-            Expression::Add(x) => {
-                let (left, right) = x.borrow();
-                Ok(resolve_expression(&left, symbols)? + resolve_expression(&right, symbols)?)
+            Expression::BinaryOp(x) => {
+                let (op, (left, right)) = (&x.0, x.1.borrow());
+
+                let left: usize = resolve_expression(&left, symbols)?;
+                let right = resolve_expression(&right, symbols)?;
+
+                Ok(match op {
+                    BinaryOpType::Add => left + right,
+                    BinaryOpType::Sub => left - right,
+                    BinaryOpType::Mul => left * right,
+                    BinaryOpType::Div => left / right,
+                })
             }
         }
+    }
+
+    fn make_error_msg(msg: &str, squiggly: &str, source: &str, filename: &str) -> String {
+        let mut err = String::new();
+        writeln!(
+            err,
+            "{style_bold}{color_red}error{color_reset}: {msg}{style_reset}"
+        )
+        .unwrap();
+
+        draw_line(&mut err, &source, filename, squiggly, SquigglyColor::Red);
+        err
     }
 
     let mut segment_layout: Vec<(usize, Range<*const u8>)> = Vec::new();
     // resolve segments
     for (idx, segment) in segments.iter().enumerate() {
-        let lower = resolve_expression(&segment.start, &symbols).unwrap();
+        let lower = resolve_expression(&segment.start, &symbols)
+            .map_err(|(msg, squiggly)| make_error_msg(msg, squiggly, &source, filename))?;
         symbols.insert(&segment.label, Expr::new(Expression::Literal(lower), None));
 
         let upper = lower + segment.assembled.len();
@@ -515,7 +556,9 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         match r.directive {
             Directive::I((i, expr)) => {
                 match i
-                    .set_operand_value(resolve_expression(&expr.unwrap(), &symbols).unwrap())
+                    .set_operand_value(resolve_expression(&expr.unwrap(), &symbols).map_err(
+                        |(msg, squiggly)| make_error_msg(msg, squiggly, &source, filename),
+                    )?)
                     .unwrap()
                     .to_opcode()
                     .unwrap()
@@ -532,7 +575,9 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
             Directive::Byte(x) => {
                 for (idx, e) in x.unwrap().iter().enumerate() {
                     memory[write_idx + idx] = resolve_expression(&e, &symbols)
-                        .unwrap()
+                        .map_err(|(msg, squiggly)| {
+                            make_error_msg(msg, squiggly, &source, filename)
+                        })?
                         .try_into()
                         .unwrap();
                 }
@@ -540,7 +585,9 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
             Directive::Data(x) => {
                 for (idx, e) in x.unwrap().iter().enumerate() {
                     let val: u16 = resolve_expression(&e, &symbols)
-                        .unwrap()
+                        .map_err(|(msg, squiggly)| {
+                            make_error_msg(msg, squiggly, &source, filename)
+                        })?
                         .try_into()
                         .unwrap();
                     memory[write_idx + 2 * idx] = (val >> 8) as u8;
