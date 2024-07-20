@@ -4,6 +4,8 @@
 //! represent all the opcodes for the assembler and directives for the assembler
 //! macros could possibly make this smaller, but it's not too big of a deal.
 
+use std::rc::Rc;
+
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
     CALL(Option<u16>),
@@ -70,13 +72,32 @@ pub enum Instruction {
 }
 
 #[derive(Debug, Clone)]
+pub struct Expr<'a> {
+    pub expr: Expression<'a>,
+    pub debug: Option<&'a str>,
+}
+
+impl<'a> Expr<'a> {
+    pub fn new(expr: Expression<'a>, debug: Option<&'a str>) -> Expr<'a> {
+        Expr { expr, debug }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Expression<'a> {
+    Symbol(Rc<str>),
+    Literal(usize),
+    Add(Box<(Expr<'a>, Expr<'a>)>),
+}
+
+#[derive(Debug, Clone)]
 pub enum Directive<'a> {
-    I(Instruction),
-    Br(Option<&'a str>),
-    Aorg(Option<usize>),
-    Byte(Option<Vec<u8>>),
-    Data(Option<Vec<u16>>),
+    I((Instruction, Option<Expr<'a>>)),
+    Aorg(Option<Expr<'a>>),
+    Byte(Option<Vec<Expr<'a>>>),
+    Data(Option<Vec<Expr<'a>>>),
     Text(Option<&'a str>),
+    Equ(Option<Expr<'a>>),
 }
 
 pub type I = Instruction;
@@ -85,72 +106,12 @@ pub type D<'a> = Directive<'a>;
 impl<'a> Directive<'a> {
     pub fn to_str(&self) -> &'static str {
         match self {
-            D::I(I::CALL(_)) => "call",
-            D::I(I::TXA) => "txa",
-            D::I(I::TMA) => "tma",
-            D::I(I::XBA) => "xba",
-            D::I(I::TAMIX) => "tamix",
-            D::I(I::TMAIX) => "tmaix",
-            D::I(I::SARA) => "sara",
-            D::I(I::TAM) => "tam",
-            D::I(I::TTMA) => "ttma",
-            D::I(I::TAX) => "tax",
-            D::I(I::TAPSC) => "tapsc",
-            D::I(I::TAB) => "tab",
-            D::I(I::SALA4) => "sala4",
-            D::I(I::TASYN) => "tasyn",
-            D::I(I::TAMODE) => "tamode",
-            D::I(I::TATM) => "tatm",
-            D::I(I::BRA) => "bra",
-            D::I(I::CLX) => "clx",
-            D::I(I::IXC) => "ixc",
-            D::I(I::DECXN) => "decxn",
-            D::I(I::XBX) => "xbx",
-            D::I(I::CLB) => "clb",
-            D::I(I::IBC) => "ibc",
-            D::I(I::INCMC) => "incmc",
-            D::I(I::DECMN) => "decmn",
-            D::I(I::AMAAC) => "amaac",
-            D::I(I::SMAAN) => "smaan",
-            D::I(I::TBM) => "tbm",
-            D::I(I::TRNDA) => "trnda",
-            D::I(I::ABAAC) => "abaac",
-            D::I(I::SBAAN) => "sbaan",
-            D::I(I::SALA) => "sala",
-            D::I(I::CLA) => "cla",
-            D::I(I::GET(_)) => "get",
-            D::I(I::AXTM) => "axtm",
-            D::I(I::AXMA) => "axma",
-            D::I(I::IAC) => "iac",
-            D::I(I::INTGR) => "intgr",
-            D::I(I::EXTSG) => "extsg",
-            D::I(I::RETN) => "retn",
-            D::I(I::RETI) => "reti",
-            D::I(I::SETOFF) => "setoff",
-            D::I(I::BR(_)) => "br",
-            D::I(I::ANEC(_)) => "anec",
-            D::I(I::XGEC(_)) => "xgec",
-            D::I(I::TCX(_)) => "tcx",
-            D::I(I::AGEC(_)) => "agec",
-            D::I(I::ORCM(_)) => "orcm",
-            D::I(I::ANDCM(_)) => "andcm",
-            D::I(I::TSTCM(_)) => "tstcm",
-            D::I(I::TSTCA(_)) => "tstca",
-            D::I(I::AXCA(_)) => "axca",
-            D::I(I::TMAD(_)) => "tmad",
-            D::I(I::TAMD(_)) => "tamd",
-            D::I(I::LUAA) => "luaa",
-            D::I(I::LUAPS) => "luaps",
-            D::I(I::LUAB) => "luab",
-            D::I(I::TCA(_)) => "tca",
-            D::I(I::TMXD(_)) => "tmxd",
-            D::I(I::ACAAC(_)) => "acaac",
-            D::I(I::SBR(_)) => "sbr",
-            D::Br(_) => "BR",
+            D::I((i, _)) => i.to_str(),
             D::Aorg(_) => "AORG",
             D::Byte(_) => "BYTE",
             D::Data(_) => "DATA",
             D::Text(_) => "TEXT",
+            D::Equ(_) => "EQU",
         }
     }
 }
@@ -160,72 +121,82 @@ impl TryFrom<&str> for Directive<'_> {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Ok(match value {
-            "call" => D::I(I::CALL(None)),
-            "txa" => D::I(I::TXA),
-            "tma" => D::I(I::TMA),
-            "xba" => D::I(I::XBA),
-            "tamix" => D::I(I::TAMIX),
-            "tmaix" => D::I(I::TMAIX),
-            "sara" => D::I(I::SARA),
-            "tam" => D::I(I::TAM),
-            "ttma" => D::I(I::TTMA),
-            "tax" => D::I(I::TAX),
-            "tapsc" => D::I(I::TAPSC),
-            "tab" => D::I(I::TAB),
-            "sala4" => D::I(I::SALA4),
-            "tasyn" => D::I(I::TASYN),
-            "tamode" => D::I(I::TAMODE),
-            "tatm" => D::I(I::TATM),
-            "bra" => D::I(I::BRA),
-            "clx" => D::I(I::CLX),
-            "ixc" => D::I(I::IXC),
-            "decxn" => D::I(I::DECXN),
-            "xbx" => D::I(I::XBX),
-            "clb" => D::I(I::CLB),
-            "ibc" => D::I(I::IBC),
-            "incmc" => D::I(I::INCMC),
-            "decmn" => D::I(I::DECMN),
-            "amaac" => D::I(I::AMAAC),
-            "smaan" => D::I(I::SMAAN),
-            "tbm" => D::I(I::TBM),
-            "trnda" => D::I(I::TRNDA),
-            "abaac" => D::I(I::ABAAC),
-            "sbaan" => D::I(I::SBAAN),
-            "sala" => D::I(I::SALA),
-            "cla" => D::I(I::CLA),
-            "get" => D::I(I::GET(None)),
-            "axtm" => D::I(I::AXTM),
-            "axma" => D::I(I::AXMA),
-            "iac" => D::I(I::IAC),
-            "intgr" => D::I(I::INTGR),
-            "extsg" => D::I(I::EXTSG),
-            "retn" => D::I(I::RETN),
-            "reti" => D::I(I::RETI),
-            "setoff" => D::I(I::SETOFF),
-            "br" => D::I(I::BR(None)),
-            "anec" => D::I(I::ANEC(None)),
-            "xgec" => D::I(I::XGEC(None)),
-            "tcx" => D::I(I::TCX(None)),
-            "agec" => D::I(I::AGEC(None)),
-            "orcm" => D::I(I::ORCM(None)),
-            "andcm" => D::I(I::ANDCM(None)),
-            "tstcm" => D::I(I::TSTCM(None)),
-            "tstca" => D::I(I::TSTCA(None)),
-            "axca" => D::I(I::AXCA(None)),
-            "tmad" => D::I(I::TMAD(None)),
-            "tamd" => D::I(I::TAMD(None)),
-            "luaa" => D::I(I::LUAA),
-            "luaps" => D::I(I::LUAPS),
-            "luab" => D::I(I::LUAB),
-            "tca" => D::I(I::TCA(None)),
-            "tmxd" => D::I(I::TMXD(None)),
-            "acaac" => D::I(I::ACAAC(None)),
-            "sbr" => D::I(I::SBR(None)),
-            "BR" => D::Br(None),
             "AORG" => D::Aorg(None),
             "BYTE" => D::Byte(None),
             "DATA" => D::Data(None),
             "TEXT" => D::Text(None),
+            "EQU" => D::Equ(None),
+            _ => D::I((value.try_into()?, None)),
+        })
+    }
+}
+
+impl TryFrom<&str> for Instruction {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(match value {
+            "call" => I::CALL(None),
+            "txa" => I::TXA,
+            "tma" => I::TMA,
+            "xba" => I::XBA,
+            "tamix" => I::TAMIX,
+            "tmaix" => I::TMAIX,
+            "sara" => I::SARA,
+            "tam" => I::TAM,
+            "ttma" => I::TTMA,
+            "tax" => I::TAX,
+            "tapsc" => I::TAPSC,
+            "tab" => I::TAB,
+            "sala4" => I::SALA4,
+            "tasyn" => I::TASYN,
+            "tamode" => I::TAMODE,
+            "tatm" => I::TATM,
+            "bra" => I::BRA,
+            "clx" => I::CLX,
+            "ixc" => I::IXC,
+            "decxn" => I::DECXN,
+            "xbx" => I::XBX,
+            "clb" => I::CLB,
+            "ibc" => I::IBC,
+            "incmc" => I::INCMC,
+            "decmn" => I::DECMN,
+            "amaac" => I::AMAAC,
+            "smaan" => I::SMAAN,
+            "tbm" => I::TBM,
+            "trnda" => I::TRNDA,
+            "abaac" => I::ABAAC,
+            "sbaan" => I::SBAAN,
+            "sala" => I::SALA,
+            "cla" => I::CLA,
+            "get" => I::GET(None),
+            "axtm" => I::AXTM,
+            "axma" => I::AXMA,
+            "iac" => I::IAC,
+            "intgr" => I::INTGR,
+            "extsg" => I::EXTSG,
+            "retn" => I::RETN,
+            "reti" => I::RETI,
+            "setoff" => I::SETOFF,
+            "br" => I::BR(None),
+            "anec" => I::ANEC(None),
+            "xgec" => I::XGEC(None),
+            "tcx" => I::TCX(None),
+            "agec" => I::AGEC(None),
+            "orcm" => I::ORCM(None),
+            "andcm" => I::ANDCM(None),
+            "tstcm" => I::TSTCM(None),
+            "tstca" => I::TSTCA(None),
+            "axca" => I::AXCA(None),
+            "tmad" => I::TMAD(None),
+            "tamd" => I::TAMD(None),
+            "luaa" => I::LUAA,
+            "luaps" => I::LUAPS,
+            "luab" => I::LUAB,
+            "tca" => I::TCA(None),
+            "tmxd" => I::TMXD(None),
+            "acaac" => I::ACAAC(None),
+            "sbr" => I::SBR(None),
             _ => Err(())?,
         })
     }
@@ -234,6 +205,72 @@ impl TryFrom<&str> for Directive<'_> {
 impl Instruction {
     pub fn has_operand_byte(opcode: u8) -> bool {
         matches!(opcode, 0x00..=0x0F | 0x40..=0x6A | 0x6E..=0x7F)
+    }
+
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            I::CALL(_) => "call",
+            I::TXA => "txa",
+            I::TMA => "tma",
+            I::XBA => "xba",
+            I::TAMIX => "tamix",
+            I::TMAIX => "tmaix",
+            I::SARA => "sara",
+            I::TAM => "tam",
+            I::TTMA => "ttma",
+            I::TAX => "tax",
+            I::TAPSC => "tapsc",
+            I::TAB => "tab",
+            I::SALA4 => "sala4",
+            I::TASYN => "tasyn",
+            I::TAMODE => "tamode",
+            I::TATM => "tatm",
+            I::BRA => "bra",
+            I::CLX => "clx",
+            I::IXC => "ixc",
+            I::DECXN => "decxn",
+            I::XBX => "xbx",
+            I::CLB => "clb",
+            I::IBC => "ibc",
+            I::INCMC => "incmc",
+            I::DECMN => "decmn",
+            I::AMAAC => "amaac",
+            I::SMAAN => "smaan",
+            I::TBM => "tbm",
+            I::TRNDA => "trnda",
+            I::ABAAC => "abaac",
+            I::SBAAN => "sbaan",
+            I::SALA => "sala",
+            I::CLA => "cla",
+            I::GET(_) => "get",
+            I::AXTM => "axtm",
+            I::AXMA => "axma",
+            I::IAC => "iac",
+            I::INTGR => "intgr",
+            I::EXTSG => "extsg",
+            I::RETN => "retn",
+            I::RETI => "reti",
+            I::SETOFF => "setoff",
+            I::BR(_) => "br",
+            I::ANEC(_) => "anec",
+            I::XGEC(_) => "xgec",
+            I::TCX(_) => "tcx",
+            I::AGEC(_) => "agec",
+            I::ORCM(_) => "orcm",
+            I::ANDCM(_) => "andcm",
+            I::TSTCM(_) => "tstcm",
+            I::TSTCA(_) => "tstca",
+            I::AXCA(_) => "axca",
+            I::TMAD(_) => "tmad",
+            I::TAMD(_) => "tamd",
+            I::LUAA => "luaa",
+            I::LUAPS => "luaps",
+            I::LUAB => "luab",
+            I::TCA(_) => "tca",
+            I::TMXD(_) => "tmxd",
+            I::ACAAC(_) => "acaac",
+            I::SBR(_) => "sbr",
+        }
     }
 
     pub fn set_operand_value(self, value: usize) -> Result<Self, ()> {
@@ -325,7 +362,7 @@ impl Instruction {
             I::SBR(Some(x)) => (0x80 | x, None),
             _ => Err(format!(
                 "instruction '{}' must have an argument",
-                D::I(self).to_str()
+                self.to_str()
             ))?,
         })
     }
@@ -344,6 +381,32 @@ impl Instruction {
                 | I::LUAA
                 | I::LUAB
                 | I::LUAPS
+                | I::ORCM(_)
+                | I::TAMD(_)
+                | I::TCA(_)
+                | I::TCX(_)
+                | I::TMAD(_)
+                | I::TMXD(_)
+                | I::TSTCA(_)
+                | I::TSTCM(_)
+                | I::XGEC(_)
+        ) {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub fn num_bytes(&self) -> usize {
+        if matches!(
+            self,
+            I::ACAAC(_)
+                | I::AGEC(_)
+                | I::ANDCM(_)
+                | I::ANEC(_)
+                | I::AXCA(_)
+                | I::BR(_)
+                | I::CALL(_)
                 | I::ORCM(_)
                 | I::TAMD(_)
                 | I::TCA(_)

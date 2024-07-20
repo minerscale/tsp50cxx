@@ -2,16 +2,17 @@
 //!
 //! This assembler has full unicode support and a syntax highlighting file.
 
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs::File;
 use std::io::Read;
+use std::ops::Range;
+use std::rc::Rc;
 use std::str::FromStr;
+use std::{borrow::Borrow, collections::HashMap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::instruction::{Directive, Instruction, D, I};
+use crate::instruction::{Directive, Expr, Expression, Instruction, D};
 use inline_colorization::*;
-use slicevec::SliceVec;
 
 #[derive(Debug)]
 struct SyntaxError<'a> {
@@ -19,26 +20,65 @@ struct SyntaxError<'a> {
     slice: &'a str,
 }
 
-fn make_ast<'a>(
-    program: &'a [&'a str],
-) -> Result<Vec<(Option<&'a str>, Directive<'a>)>, (&'a str, usize, SyntaxError<'a>)> {
-    fn parse_number(literal: &str) -> Result<usize, SyntaxError> {
-        if let Some(hex) = literal.strip_prefix('#') {
-            usize::from_str_radix(hex, 16)
-        } else {
-            usize::from_str(literal)
+fn lstrip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
+    value
+        .find(|c: char| !c.is_whitespace())
+        .map(|x| &value[x..])
+}
+
+fn rstrip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
+    value.rfind(|c: char| !c.is_whitespace()).and_then(|idx| {
+        match value[idx..].char_indices().nth(1) {
+            Some((next_idx, _)) => Some(&value[..idx + next_idx]),
+            None => Some(&value),
         }
-        .map_err(|_| SyntaxError {
-            msg: vec!["failed to parse number"],
-            slice: literal,
-        })
+    })
+}
+
+fn strip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
+    lstrip_whitespace(value).and_then(|x| rstrip_whitespace(x))
+}
+
+fn make_ast<'a>(
+    source: &'a [&'a str],
+) -> Result<Vec<(Option<&'a str>, Option<Directive<'a>>)>, SyntaxError<'a>> {
+    fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
+        match literal.split_once('+') {
+            Some((left, right)) => Ok(Expr::new(
+                Expression::Add(Box::new((
+                    parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
+                        msg: vec!["must have expression left of '+' operator"],
+                        slice: left,
+                    })?)?,
+                    parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
+                        msg: vec!["must have expression right of '+' operator"],
+                        slice: right,
+                    })?)?,
+                ))),
+                Some(literal),
+            )),
+            None => match if let Some(hex) = literal.strip_prefix('#') {
+                usize::from_str_radix(hex, 16)
+            } else {
+                usize::from_str(literal)
+            } {
+                Ok(v) => Ok(Expr::new(Expression::Literal(v), Some(literal))),
+                Err(_) => Ok(Expr::new(Expression::Symbol(literal.into()), Some(literal))),
+            },
+        }
+    }
+
+    fn parse_expression_list(line: &str) -> Result<Vec<Expr>, SyntaxError> {
+        line.split(',')
+            .map(|s| parse_expression(s))
+            .collect::<Result<Vec<_>, _>>()
     }
 
     fn parse_argument<'a>(
         label: Option<&'a str>,
         directive: Directive<'a>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
+    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
         match match line
             .char_indices()
             .find(|(_, c)| !c.is_whitespace())
@@ -52,7 +92,7 @@ fn make_ast<'a>(
                     };
                     line[idx..]
                         .char_indices()
-                        .nth(2)
+                        .nth(1)
                         .map_or(err(), |(next_idx, _)| {
                             line[(idx + next_idx)..].find('"').map_or(err(), |end| {
                                 Ok(Some(&line[(idx + next_idx)..(idx + next_idx + end)]))
@@ -70,54 +110,25 @@ fn make_ast<'a>(
                     Ok(Some(
                         line[idx + end_idx..]
                             .char_indices()
-                            .nth(2)
+                            .nth(1)
                             .map_or(&line[idx..], |(next_idx, _)| {
-                                &line[idx..(idx + end_idx + next_idx - 1)]
+                                &line[idx..(idx + end_idx + next_idx)]
                             }),
                     ))
                 }
             }) {
             Ok(Some(arg)) => match directive {
-                D::I(i) => match parse_number(arg) {
-                    Ok(x) => match i.set_operand_value(x) {
-                        Ok(x) => Ok(D::I(x)),
-                        Err(_) => Err(SyntaxError {
-                            msg: vec!["instruction '", directive.to_str(), "' has no operand"],
-                            slice: arg,
-                        }),
-                    },
-                    Err(e) => Err(e),
-                },
-                D::Br(_) => Ok(D::Br(Some(arg))),
-                D::Aorg(_) => parse_number(arg).map(|x| D::Aorg(Some(x))),
-                D::Byte(_) => arg
-                    .split(',')
-                    .map(|s| match parse_number(s) {
-                        Ok(x) => u8::try_from(x).map_err(|_| SyntaxError {
-                            msg: vec!["BYTE must be between #00 and #FF"],
-                            slice: arg,
-                        }),
-                        Err(e) => Err(e),
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|x| D::Byte(Some(x))),
-                D::Data(_) => arg
-                    .split(',')
-                    .map(|s| match parse_number(s) {
-                        Ok(x) => u16::try_from(x).map_err(|_| SyntaxError {
-                            msg: vec!["DATA must be between #0000 and #FFFF"],
-                            slice: arg,
-                        }),
-                        Err(e) => Err(e),
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|x| D::Data(Some(x))),
+                D::I((i, _)) => parse_expression(arg).map(|x| D::I((i, Some(x)))),
+                D::Aorg(_) => parse_expression(arg).map(|x| D::Aorg(Some(x))),
+                D::Byte(_) => parse_expression_list(arg).map(|x| D::Byte(Some(x))),
+                D::Data(_) => parse_expression_list(arg).map(|x| D::Data(Some(x))),
                 D::Text(_) => Ok(D::Text(Some(arg))),
+                D::Equ(_) => parse_expression(arg).map(|x| D::Equ(Some(x))),
             },
             Ok(None) => Ok(directive),
             Err(e) => Err(e),
         } {
-            Ok(directive) => Some(Ok((label, directive))),
+            Ok(directive) => Some(Ok((label, Some(directive)))),
             Err(e) => Some(Err(e)),
         }
     }
@@ -125,9 +136,9 @@ fn make_ast<'a>(
     fn parse_keyword_or_label<'a>(
         label: Option<&'a str>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
+    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
         let get_directive = |s| match Directive::try_from(s) {
-            Ok(d) => Some(Ok((label, d))),
+            Ok(d) => Some(Ok((label, Some(d)))),
             Err(_) => Some(Err(SyntaxError {
                 msg: vec!["directive not recognised"],
                 slice: s,
@@ -142,12 +153,9 @@ fn make_ast<'a>(
                 match c {
                     // Label
                     ':' => line[idx..].char_indices().nth(1).map_or(
-                        Some(Err(SyntaxError {
-                            msg: vec!["expected directive after label"],
-                            slice: &line[idx..],
-                        })),
+                        Some(Ok((Some(&line[..idx]), None))),
                         |(after_colon, _)| {
-                            parse_main(Some(&line[..idx]), &line[(idx + after_colon)..])
+                            parse_line(Some(&line[..idx]), &line[(idx + after_colon)..])
                         },
                     ),
                     // Comment delimiter
@@ -166,54 +174,82 @@ fn make_ast<'a>(
         }
     }
 
-    fn parse_main<'a>(
+    fn parse_line<'a>(
         label: Option<&'a str>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Directive<'a>), SyntaxError<'a>>> {
-        match line.find(|c: char| !c.is_whitespace()) {
-            Some(idx) => parse_keyword_or_label(label, &line[idx..]),
-            None => None,
-        }
+    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
+        line.char_indices()
+            .find(|(_, c)| !c.is_whitespace())
+            .and_then(|(idx, c)| match c {
+                '%' => None,
+                _ => parse_keyword_or_label(label, &line[idx..]),
+            })
     }
 
-    program
+    source
         .into_iter()
-        .enumerate()
-        .filter_map(|(line_number, &line)| {
-            parse_main(None, line).map(|x| x.map_err(|e| (line, line_number, e)))
+        .filter_map(|&line| {
+            parse_line(None, line).map(|x| match x {
+                Ok((label, directive)) => Ok((label, directive)),
+                Err(e) => Err(e),
+            })
         })
         .collect()
 }
 
+enum SquigglyColor {
+    Red,
+    Green,
+}
+
 fn draw_line(
     msg: &mut String,
-    line: &str,
+    source: &str,
     filename: &str,
-    line_number: usize,
-    column: Option<usize>,
+    squiggly: &str,
+    squiggly_color: SquigglyColor,
 ) {
+    let line_number = source[..(squiggly.as_bytes().as_ptr() as usize - source.as_ptr() as usize)]
+        .chars()
+        .fold(0usize, |count, c| if c == '\n' { count + 1 } else { count });
+
+    let line = source.lines().nth(line_number).unwrap();
     let line_number = line_number + 1; // Stupid humans start their line numbers at 1
     let padding = " ".repeat(line_number.to_string().len());
 
-    match column {
-        Some(column) => writeln!(
+    // In any other language this wouldn't be hacky
+    {
+        let column = squiggly.as_bytes().as_ptr_range().start as usize - line.as_ptr() as usize;
+
+        writeln!(
             msg,
             "{padding}{color_blue}-->{color_reset}{style_reset} {filename}:{line_number}:{column}"
-        ),
-        None => writeln!(
-            msg,
-            "{padding}{color_blue}-->{color_reset}{style_reset} {filename}:{line_number}"
-        ),
-    }
-    .unwrap();
+        )
+        .unwrap();
 
-    writeln!(msg, " {padding}{style_bold}{color_blue}|").unwrap();
-    writeln!(msg, "{line_number} |{color_reset}{style_reset}{line}").unwrap();
-    write!(
-        msg,
-        " {padding}{color_blue}{style_bold}|{color_reset}{style_reset}"
-    )
-    .unwrap();
+        writeln!(msg, " {padding}{style_bold}{color_blue}|").unwrap();
+        writeln!(msg, "{line_number} |{color_reset}{style_reset} {line}").unwrap();
+        write!(
+            msg,
+            " {padding}{color_blue}{style_bold}|{color_reset}{style_reset}"
+        )
+        .unwrap();
+
+        match squiggly_color {
+            SquigglyColor::Red => write!(
+                msg,
+                " {color_red}{}{color_reset}{style_reset}",
+                " ".repeat(line[..column].width()) + &("^".repeat(squiggly.width()))
+            )
+            .unwrap(),
+            SquigglyColor::Green => write!(
+                msg,
+                " {color_green}{}{color_reset}{style_reset}",
+                " ".repeat(line[..column].width()) + &("^".repeat(squiggly.width()))
+            )
+            .unwrap(),
+        }
+    }
 }
 
 pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
@@ -223,149 +259,302 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         .read_to_string(&mut source)
         .map_err(|_| format!("{style_bold}{color_red}error{color_reset}: unable to read source file '{filename}'{style_reset}"))?;
 
-    let source = source.lines().collect::<Vec<_>>();
-    let ast: Vec<(Option<&str>, Directive)> =
-        make_ast(&source).map_err(|(line, line_number, e)| {
-            // In any other language this wouldn't be hacky
-            let column: usize =
-                e.slice.as_bytes().as_ptr_range().start as usize - line.as_ptr() as usize;
+    let source_lines = source.lines().collect::<Vec<_>>();
+    let ast: Vec<(Option<&str>, Option<Directive>)> = make_ast(&source_lines).map_err(|e| {
+        let mut msg = String::new();
+        writeln!(
+            msg,
+            "{style_bold}{color_red}error{color_reset}: {}",
+            e.msg.concat()
+        )
+        .unwrap();
+        draw_line(&mut msg, &source, filename, e.slice, SquigglyColor::Red);
 
-            let mut msg = String::new();
-            writeln!(
-                msg,
-                "{style_bold}{color_red}error{color_reset}: {}",
-                e.msg.concat()
-            )
-            .unwrap();
-            draw_line(&mut msg, line, filename, line_number, Some(column));
-            write!(
-                msg,
-                "{color_red}{}{color_reset}{style_reset}",
-                " ".repeat(line[..column].width()) + &("^".repeat(e.slice.width()))
-            )
-            .unwrap();
-            msg
-        })?;
+        msg
+    })?;
 
-    // Using a slicevec allows us to construct our assembled program in place.
-    let mut assembled = SliceVec::new(memory);
-    let mut labels: HashMap<&str, (u16, usize)> = HashMap::new();
-    let mut references: Vec<(&str, usize, usize)> = Vec::new();
-
-    for (line_number, (label, directive)) in ast.into_iter().enumerate() {
-        if let Some(l) = label {
-            if let Some((_, old_line_number)) =
-                labels.insert(l, (assembled.len() as u16, line_number))
-            {
-                let mut err = String::new();
-                writeln!(err, "{style_bold}{color_red}error{color_reset}: label '{l}' used twice{style_reset}").unwrap();
-
-                draw_line(&mut err, source[line_number], filename, line_number, None);
-
-                writeln!(
-                    err,
-                    "\n{style_bold}{color_green}note{color_reset}: previously used here",
-                )
-                .unwrap();
-
-                draw_line(
-                    &mut err,
-                    source[old_line_number],
-                    filename,
-                    old_line_number,
-                    None,
-                );
-                Err(err)?;
-            }
-        }
-
-        fn write_opcode(
-            instruction: &Instruction,
-            assembled: &mut SliceVec<u8>,
-        ) -> Result<(), String> {
-            match instruction.to_opcode()? {
-                (i, None) => {
-                    assembled.push(i).unwrap();
-                }
-                (i, Some(o)) => {
-                    assembled.push(i).unwrap();
-                    assembled.push(o).unwrap();
-                }
-            };
-
-            Ok(())
-        }
-
-        match directive {
-            Directive::I(i) => write_opcode(&i, &mut assembled),
-            Directive::Br(Some(i)) => {
-                references.push((i, assembled.len(), line_number));
-
-                write_opcode(&I::BR(Some(0)), &mut assembled)
-            }
-            Directive::Aorg(Some(i)) => {
-                if assembled.len() <= i {
-                    for _ in assembled.len()..i {
-                        assembled.push(0).unwrap();
-                    }
-                    Ok(())
-                } else {
-                    Err("AORG directive must leave rom strictly increasing".to_string())
-                }
-            }
-            Directive::Byte(Some(i)) => {
-                for byte in i {
-                    assembled.push(byte).unwrap();
-                }
-
-                Ok(())
-            }
-            Directive::Data(Some(i)) => {
-                for word in i {
-                    assembled.push((word >> 8) as u8).unwrap();
-                    assembled.push(word as u8).unwrap();
-                }
-
-                Ok(())
-            }
-            Directive::Text(Some(i)) => {
-                for &byte in i.as_bytes() {
-                    assembled.push(byte).unwrap();
-                }
-
-                Ok(())
-            }
-            _ => Err(format!(
-                "directive {} must have an argument",
-                directive.to_str()
-            )),
-        }
-        .map_err(|e| {
-            let mut err = String::new();
-
-            writeln!(
-                err,
-                "{style_bold}{color_red}error{color_reset}: {e}{style_reset}"
-            )
-            .unwrap();
-            draw_line(&mut err, source[line_number], filename, line_number, None);
-            err
-        })?
+    #[derive(Debug)]
+    struct Reference<'a> {
+        segment: usize,
+        byte: usize,
+        directive: Directive<'a>,
     }
 
-    // Fix addresses
-    for reference in references {
-        let opcode = I::BR(Some(match labels.get(reference.0) {
-            Some((byte, _)) => *byte,
-            None => {
-                let mut err = String::new();
-                writeln!(err, "{style_bold}{color_red}error{color_reset}: no corresponding label for '{}' {style_reset}",reference.0).unwrap();
-                draw_line(&mut err, source[reference.2], filename, reference.2, None);
-                Err(err)?
+    #[derive(Debug)]
+    struct Segment<'a> {
+        start: Expr<'a>,
+        label: Rc<str>,
+        assembled: Vec<u8>,
+    }
+
+    let mut segments: Vec<Segment> = Vec::new();
+
+    segments.push(Segment {
+        start: Expr::new(Expression::Literal(0), None),
+        label: "__segment_0".into(),
+        assembled: Vec::new(),
+    });
+
+    let mut segment_ptr = 0;
+
+    let mut symbols: HashMap<&str, Expr> = HashMap::new();
+    let mut references: Vec<Reference> = Vec::new();
+
+    fn used_twice_err(
+        source: &str,
+        filename: &str,
+        error_squiggly: &str,
+        warning_squiggly: &str,
+    ) -> String {
+        let mut err = String::new();
+        writeln!(err, "{style_bold}{color_red}error{color_reset}: label '{error_squiggly}' used twice{style_reset}").unwrap();
+
+        draw_line(
+            &mut err,
+            &source,
+            filename,
+            error_squiggly,
+            SquigglyColor::Red,
+        );
+
+        writeln!(
+            err,
+            "\n{style_bold}{color_green}note{color_reset}: previously used here",
+        )
+        .unwrap();
+        draw_line(
+            &mut err,
+            &source,
+            filename,
+            warning_squiggly,
+            SquigglyColor::Green,
+        );
+        err
+    }
+
+    for (label, directive) in ast {
+        if !matches!(directive, Some(D::Equ(_))) {
+            if let Some(l) = label {
+                if let Some(e) = symbols.insert(
+                    l,
+                    Expr::new(
+                        Expression::Add(Box::new((
+                            Expr::new(
+                                Expression::Symbol(segments.last().unwrap().label.clone()),
+                                Some(l),
+                            ),
+                            Expr::new(
+                                Expression::Literal(segments.last().unwrap().assembled.len()),
+                                Some(l),
+                            ),
+                        ))),
+                        None,
+                    ),
+                ) {
+                    Err(used_twice_err(
+                        &source,
+                        filename,
+                        l,
+                        e.debug.expect("no debug info"),
+                    ))?;
+                }
+            }
+        }
+
+        fn write_opcode(instruction: &Instruction, assembled: &mut Vec<u8>) -> Result<(), String> {
+            Ok(match instruction.to_opcode()? {
+                (i, None) => {
+                    assembled.push(i);
+                }
+                (i, Some(o)) => {
+                    assembled.push(i);
+                    assembled.push(o);
+                }
+            })
+        }
+
+        let segment = segments.last_mut().unwrap();
+
+        match directive {
+            Some(d) => match d {
+                Directive::I((instruction, None)) => {
+                    write_opcode(&instruction, &mut segment.assembled)
+                }
+                Directive::I((instruction, Some(_))) => {
+                    references.push(Reference {
+                        segment: segment_ptr,
+                        byte: segment.assembled.len(),
+                        directive: d,
+                    }); // Add expression to refrence list
+
+                    // Ensure offset correct by filling out reigon with zeros
+                    match instruction.num_bytes() {
+                        2 => {
+                            segment.assembled.push(Default::default());
+                            segment.assembled.push(Default::default());
+                        }
+                        1 => {
+                            segment.assembled.push(Default::default());
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    Ok(())
+                }
+                Directive::Aorg(Some(i)) => {
+                    if segment.assembled.is_empty() {
+                        segment.start = i
+                    } else {
+                        segment_ptr += 1;
+                        segments.push(Segment {
+                            start: i,
+                            label: ("__segment_".to_owned() + &segment_ptr.to_string()).into(),
+                            assembled: Vec::new(),
+                        });
+                    }
+
+                    Ok(())
+                }
+                Directive::Byte(Some(ref expr_list)) => {
+                    for _ in expr_list {
+                        segment.assembled.push(Default::default());
+                    }
+
+                    references.push(Reference {
+                        segment: segment_ptr,
+                        byte: segment.assembled.len(),
+                        directive: d,
+                    });
+
+                    Ok(())
+                }
+                Directive::Data(Some(ref expr_list)) => {
+                    for _ in expr_list {
+                        segment.assembled.push(Default::default());
+                        segment.assembled.push(Default::default());
+                    }
+
+                    references.push(Reference {
+                        segment: segment_ptr,
+                        byte: segment.assembled.len(),
+                        directive: d,
+                    });
+
+                    Ok(())
+                }
+                Directive::Text(Some(i)) => {
+                    for &byte in i.as_bytes() {
+                        segment.assembled.push(byte);
+                    }
+
+                    Ok(())
+                }
+                Directive::Equ(Some(expr)) => label
+                    .ok_or("EQU directive must have symbol to define".to_string())
+                    .and_then(|l| match symbols.insert(l, expr) {
+                        Some(x) => Err(used_twice_err(
+                            &source,
+                            filename,
+                            l,
+                            x.debug.expect("no debug info"),
+                        )),
+                        None => Ok(()),
+                    }),
+                _ => Err(format!("directive {} must have an argument", d.to_str())),
+            }?,
+            None => (),
+        }
+    }
+
+    fn resolve_expression<'a>(
+        expression: &'a Expr<'a>,
+        symbols: &'a HashMap<&'a str, Expr<'a>>,
+    ) -> Result<usize, (&'a str, &'a str)> {
+        match &expression.expr {
+            Expression::Literal(x) => Ok(*x),
+            Expression::Symbol(s) => match symbols.get(s.as_ref()) {
+                Some(ref sym) => resolve_expression(&sym, symbols),
+                None => Err(("symbol not found", s)),
             },
-        })).to_opcode().unwrap();
-        assembled[reference.1] = opcode.0;
-        assembled[reference.1 + 1] = opcode.1.unwrap();
+            Expression::Add(x) => {
+                let (left, right) = x.borrow();
+                Ok(resolve_expression(&left, symbols)? + resolve_expression(&right, symbols)?)
+            }
+        }
+    }
+
+    let mut segment_layout: Vec<(usize, Range<*const u8>)> = Vec::new();
+    // resolve segments
+    for (idx, segment) in segments.iter().enumerate() {
+        let lower = resolve_expression(&segment.start, &symbols).unwrap();
+        symbols.insert(&segment.label, Expr::new(Expression::Literal(lower), None));
+
+        let upper = lower + segment.assembled.len();
+
+        let a = memory[lower..upper].as_ptr_range();
+        for (_, b) in &segment_layout {
+            if (b.start <= a.start && a.start < b.end) || (b.start <= a.end && a.end < b.end) {
+                panic!("uh oh spaghettio AORG clobbo'd your data")
+            }
+        }
+        segment_layout.push((idx, memory[lower..upper].as_ptr_range()));
+
+        memory[lower..upper].copy_from_slice(&segment.assembled);
+    }
+
+    for r in references {
+        let write_idx = (segment_layout
+            .iter()
+            .find(|(s, _)| *s == r.segment)
+            .unwrap()
+            .1
+            .start as usize
+            - memory.as_ptr() as usize)
+            + r.byte;
+
+        match r.directive {
+            Directive::I((i, expr)) => {
+                match i
+                    .set_operand_value(resolve_expression(&expr.unwrap(), &symbols).unwrap())
+                    .unwrap()
+                    .to_opcode()
+                    .unwrap()
+                {
+                    (x, None) => {
+                        memory[write_idx] = x;
+                    }
+                    (x, Some(y)) => {
+                        memory[write_idx] = x;
+                        memory[write_idx + 1] = y;
+                    }
+                }
+            }
+            Directive::Byte(x) => {
+                for (idx, e) in x.unwrap().iter().enumerate() {
+                    memory[write_idx + idx] = resolve_expression(&e, &symbols)
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                }
+            }
+            Directive::Data(x) => {
+                for (idx, e) in x.unwrap().iter().enumerate() {
+                    let val: u16 = resolve_expression(&e, &symbols)
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    memory[write_idx + 2 * idx] = (val >> 8) as u8;
+                    memory[write_idx + 2 * idx + 1] = val as u8;
+                }
+            }
+            Directive::Aorg(_) => unreachable!(),
+            Directive::Text(_) => unreachable!(),
+            Directive::Equ(_) => unreachable!(),
+        }
+    }
+
+    for s in &symbols {
+        println!("{s:?}");
     }
 
     Ok(())

@@ -22,7 +22,7 @@ contexts:
     - match: '\b(call|txa|tma|xba|tamix|tmaix|sara|tam|ttma|tax|tapsc|tab|sala4|tasyn|tamode|tatm|bra|clx|ixc|decxn|xbx|clb|ibc|incmc|decmn|amaac|smaan|tbm|trnda|abaac|sbaan|sala|cla|get|axtm|axma|iac|intgr|extsg|retn|reti|setoff|br|anec|xgec|tcx|agec|orcm|andcm|tstcm|tstca|axca|tmad|tamd|luaa|luaps|luab|tca|tmxd|acaac|sbr)\b'
       scope: keyword.control.tsp
 
-    - match: '\b(BR|AORG|BYTE|DATA|TEXT)\b'
+    - match: '\b(AORG|BYTE|DATA|TEXT|EQU)\b'
       scope: keyword.control.tsp
 
     # Numbers

@@ -2,7 +2,6 @@
 //!
 //! This software is based on the TSP50C0X/1X spec from https://www.ti.com/lit/ml/spss011d/spss011d.pdf
 
-#![allow(dead_code)]
 #![allow(clippy::upper_case_acronyms)]
 
 use arbitrary_int::{u12, u14};
@@ -175,7 +174,6 @@ pub struct TSP50 {
     synthesis_mem: [Uninit<u12>; 16],
     mem: [Uninit<u8>; 120],
     rom: [u8; 16384],
-    excitation_rom: [u8; 384],
 }
 
 impl fmt::Debug for TSP50 {
@@ -214,7 +212,6 @@ impl Default for TSP50 {
             synthesis_mem: [Default::default(); 16],
             mem: [Default::default(); 120],
             rom: [Default::default(); 16384],
-            excitation_rom: [Default::default(); 384],
         }
     }
 }
