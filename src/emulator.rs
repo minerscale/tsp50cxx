@@ -35,7 +35,7 @@ enum IntegerMode {
     Integer = 1,
 }
 
-impl Debug for IntegerMode {
+impl fmt::Debug for IntegerMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IntegerMode::ExtSign => f.write_str("Ext"),
@@ -113,7 +113,7 @@ impl Num<u14> for u14 {
 }
 
 #[derive(Debug, PartialEq)]
-enum Status {
+pub enum Status {
     Continue,
     Halt,
 }
@@ -154,7 +154,7 @@ pub struct TSP50 {
     integer_mode: Uninit<IntegerMode>,
     timer: Uninit<u8>,
     timer_prescale: Uninit<u8>,
-    timer_prescale_count: Uninit<u8>,
+    timer_prescale_count: u8,
     timer_begun: bool,
     pitch: Uninit<u14>,
     dac: Uninit<i16>,
@@ -178,9 +178,9 @@ pub struct TSP50 {
 }
 
 impl fmt::Debug for TSP50 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("pc: {:04x} | a: {:04x} | b: {:04x} | x: {:02x} | s: {:x} | mode: {:?} | stack: [{:04x}|{:04x}|{:04x}] | sp: {:3?}",
-            &self.pc, &self.a.unwrap_or_default(), &self.b.unwrap_or_default(), &self.x.unwrap_or_default(), &(self.status.unwrap_or_default() as u8), &self.integer_mode, &self.stack.stack[0].unwrap_or_default(), &self.stack.stack[1].unwrap_or_default(), &self.stack.stack[2].unwrap_or_default(), &self.stack.sp))
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("pc: {:04x} | a: {:04x} | b: {:04x} | x: {:02x} | s: {:x} | mode: {:?} | timer: {:?} | prescale: {:?} | sp: {:3?}",
+            &self.pc, &self.a.unwrap_or_default(), &self.b.unwrap_or_default(), &self.x.unwrap_or_default(), &(self.status.unwrap_or_default() as u8), &self.integer_mode, &self.timer, &self.timer_prescale, &self.stack.sp))
     }
 }
 
@@ -224,19 +224,12 @@ impl TSP50 {
         Default::default()
     }
 
-    pub fn run(&mut self) {
-        while self.step() == Status::Continue {
-            println!("{:?}", self);
-            std::thread::sleep(std::time::Duration::from_millis(100))
-        }
-    }
-
     pub fn rom_mut(&mut self) -> (&mut [u8], &mut [u8]) {
         (&mut self.rom, &mut self.excitation_rom)
     }
 
-    pub fn rom(&mut self) -> &[u8] {
-        &self.rom
+    pub fn pc(&self) -> &u14 {
+        &self.pc
     }
 
     fn handle_interrupts(&mut self) {
@@ -303,7 +296,7 @@ impl TSP50 {
         }
     }
 
-    fn step(&mut self) -> Status {
+    pub fn step(&mut self) -> Status {
         self.handle_interrupts();
         let instruction = self.fetch();
         self.execute(instruction)
@@ -755,6 +748,7 @@ impl TSP50 {
             I::TATM => {
                 self.set_status(true);
                 self.timer = Uninit::Some(self.a.unwrap().value() as u8);
+                self.timer_begun = true;
             }
             I::TAX => {
                 self.set_status(true);
@@ -840,15 +834,16 @@ impl TSP50 {
         self.num_cycles += cycles;
 
         if self.timer_begun {
-            let timer_prescale = self.timer_prescale.unwrap() as usize;
-            let (timer_prescale_count, overflow) = (self.timer_prescale_count.unwrap() as usize
-                + cycles)
-                .overflowing_rem(timer_prescale + 1);
+            let timer_prescale = self.timer_prescale.unwrap();
+            let next_count = self.timer_prescale_count as usize + cycles;
+            let denom = (timer_prescale as usize) + 1;
+            let num_overflows: u8 = (next_count / denom).try_into().unwrap();
+            let rem = next_count % denom;
 
-            self.timer_prescale_count = Uninit::Some(timer_prescale_count as u8);
+            self.timer_prescale_count = rem as u8;
 
-            if overflow {
-                let (timer, interrupt) = self.timer.unwrap().overflowing_sub(1);
+            if num_overflows > 0 {
+                let (timer, interrupt) = self.timer.unwrap().overflowing_sub(num_overflows as u8);
                 self.timer = Uninit::Some(timer);
                 if interrupt {
                     self.interrupt_2.state = Interrupt::Requested;

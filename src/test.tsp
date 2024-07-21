@@ -259,7 +259,7 @@ ram_loop:   tamix               % Clear RAM, increment pointer
 
             br      go          % yes, skip vector tables
             br      ram_loop    % no, go back
-%
+
 %---------------------------------------------------------%
 %   Interrupt vectors                                     %
 %---------------------------------------------------------%

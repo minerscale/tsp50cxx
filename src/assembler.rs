@@ -4,7 +4,6 @@
 
 use std::fmt::Write;
 use std::ops::Range;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::{borrow::Borrow, collections::HashMap};
 use unicode_width::UnicodeWidthStr;
@@ -15,9 +14,9 @@ use crate::instruction::{
 use inline_colorization::*;
 
 #[derive(Debug)]
-struct SyntaxError<'a> {
-    msg: Vec<&'a str>,
-    slice: &'a str,
+pub struct SyntaxError<'a> {
+    pub msg: Vec<&'a str>,
+    pub slice: &'a str,
 }
 
 fn lstrip_whitespace(value: &str) -> Option<&str> {
@@ -35,101 +34,155 @@ fn rstrip_whitespace(value: &str) -> Option<&str> {
         })
 }
 
-fn strip_whitespace(value: &str) -> Option<&str> {
+pub fn strip_whitespace(value: &str) -> Option<&str> {
     lstrip_whitespace(value).and_then(|x| rstrip_whitespace(x))
+}
+
+fn segment_ptr_to_str(value: usize) -> &'static str {
+    match value {
+        0 => "__segment_0",
+        1 => "__segment_1",
+        2 => "__segment_2",
+        3 => "__segment_3",
+        4 => "__segment_4",
+        5 => "__segment_5",
+        6 => "__segment_6",
+        7 => "__segment_7",
+        8 => "__segment_8",
+        9 => "__segment_9",
+        10 => "__segment_10",
+        11 => "__segment_11",
+        12 => "__segment_12",
+        13 => "__segment_13",
+        14 => "__segment_14",
+        15 => "__segment_15",
+        _ => panic!("uh oh I ran out of segment names.. add more please"),
+    }
+}
+
+pub fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
+    match parse_order_of_operations(literal)? {
+        Some(op) => Ok(Expr::new(Expression::Op(op), Some(literal))),
+        None => match if let Some(hex) = literal.strip_prefix('#') {
+            usize::from_str_radix(hex, 16)
+        } else {
+            usize::from_str(literal)
+        } {
+            Ok(v) => Ok(Expr::new(Expression::Literal(v), Some(literal))),
+            Err(_) => Ok(Expr::new(Expression::Symbol(literal.into()), Some(literal))),
+        },
+    }
+}
+
+fn parse_order_of_operations(value: &str) -> Result<Option<Op>, SyntaxError> {
+    fn to_op_binary(
+        op_type: BinaryOpType,
+        value: &str,
+        idx: usize,
+    ) -> Result<Option<Op>, SyntaxError> {
+        let (left, right) = (
+            &value[..idx],
+            value
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| &value[idx + i..])
+                .unwrap_or(&value[idx..idx]),
+        );
+        Ok(Some(Op::BinaryOp(BinaryOp {
+            operation: op_type,
+            operands: Box::new((
+                parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
+                    msg: vec!["must have expression to the left of a binary operator"],
+                    slice: left,
+                })?)?,
+                parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
+                    msg: vec!["must have expression the right of a binary operator"],
+                    slice: right,
+                })?)?,
+            )),
+        })))
+    }
+
+    fn to_op_unary(
+        op_type: UnaryOpType,
+        value: &str,
+        idx: usize,
+    ) -> Result<Option<Op>, SyntaxError> {
+        let right = value
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| &value[idx + i..])
+            .unwrap_or(&value[idx..idx]);
+
+        Ok(Some(Op::UnaryOp(UnaryOp {
+            operation: op_type,
+            operand: Box::new(parse_expression(strip_whitespace(right).ok_or_else(
+                || SyntaxError {
+                    msg: vec!["must have expression right of a unary operator"],
+                    slice: right,
+                },
+            )?)?),
+        })))
+    }
+
+    match value.char_indices().rfind(|(_, c)| matches!(c, '+' | '-')) {
+        Some((idx, c)) => match c {
+            '+' => to_op_binary(BinaryOpType::Add, value, idx),
+            '-' => to_op_binary(BinaryOpType::Sub, value, idx),
+            _ => unreachable!(),
+        },
+        None => match value.char_indices().rfind(|(_, c)| matches!(c, '*' | '/')) {
+            Some((idx, c)) => match c {
+                '*' => to_op_binary(BinaryOpType::Mul, value, idx),
+                '/' => to_op_binary(BinaryOpType::Div, value, idx),
+                _ => unreachable!(),
+            },
+            None => match value.char_indices().rfind(|(_, c)| matches!(c, '~')) {
+                Some((idx, c)) => match c {
+                    '~' => to_op_unary(UnaryOpType::BitNot, value, idx),
+                    _ => unreachable!(),
+                },
+                None => Ok(None),
+            },
+        },
+    }
+}
+
+pub fn resolve_expression<'a>(
+    expression: &'a Expr<'a>,
+    symbols: &'a HashMap<&'a str, Expr<'a>>,
+) -> Result<usize, (&'a str, &'a str)> {
+    match &expression.expr {
+        Expression::Literal(x) => Ok(*x),
+        Expression::Symbol(s) => match symbols.get(s) {
+            Some(sym) => resolve_expression(sym, symbols),
+            None => Err(("symbol not found", expression.debug.expect("no debug info"))),
+        },
+        Expression::Op(op) => match op {
+            Op::UnaryOp(op) => {
+                let right = resolve_expression(&op.operand, symbols)?;
+                Ok(match op.operation {
+                    UnaryOpType::BitNot => !right,
+                })
+            }
+            Op::BinaryOp(op) => {
+                let (left, right) = op.operands.borrow();
+                let left: usize = resolve_expression(left, symbols)?;
+                let right = resolve_expression(right, symbols)?;
+                Ok(match op.operation {
+                    BinaryOpType::Add => left + right,
+                    BinaryOpType::Sub => left - right,
+                    BinaryOpType::Mul => left * right,
+                    BinaryOpType::Div => left / right,
+                })
+            }
+        },
+    }
 }
 
 type AstFrame<'a> = (Option<&'a str>, Option<Directive<'a>>, &'a str);
 
 fn make_ast(source: &str) -> Result<Vec<AstFrame>, SyntaxError> {
-    fn parse_order_of_operations(value: &str) -> Result<Option<Op>, SyntaxError> {
-        fn to_op_binary(
-            op_type: BinaryOpType,
-            value: &str,
-            idx: usize,
-        ) -> Result<Option<Op>, SyntaxError> {
-            let (left, right) = (
-                &value[..idx],
-                value
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| &value[idx + i..])
-                    .unwrap_or(&value[idx..idx]),
-            );
-            Ok(Some(Op::BinaryOp(BinaryOp {
-                operation: op_type,
-                operands: Box::new((
-                    parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
-                        msg: vec!["must have expression to the left of a binary operator"],
-                        slice: left,
-                    })?)?,
-                    parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
-                        msg: vec!["must have expression the right of a binary operator"],
-                        slice: right,
-                    })?)?,
-                )),
-            })))
-        }
-
-        fn to_op_unary(
-            op_type: UnaryOpType,
-            value: &str,
-            idx: usize,
-        ) -> Result<Option<Op>, SyntaxError> {
-            let right = value
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| &value[idx + i..])
-                .unwrap_or(&value[idx..idx]);
-
-            Ok(Some(Op::UnaryOp(UnaryOp {
-                operation: op_type,
-                operand: Box::new(parse_expression(strip_whitespace(right).ok_or_else(
-                    || SyntaxError {
-                        msg: vec!["must have expression right of a unary operator"],
-                        slice: right,
-                    },
-                )?)?),
-            })))
-        }
-
-        match value.char_indices().rfind(|(_, c)| matches!(c, '+' | '-')) {
-            Some((idx, c)) => match c {
-                '+' => to_op_binary(BinaryOpType::Add, value, idx),
-                '-' => to_op_binary(BinaryOpType::Sub, value, idx),
-                _ => unreachable!(),
-            },
-            None => match value.char_indices().rfind(|(_, c)| matches!(c, '*' | '/')) {
-                Some((idx, c)) => match c {
-                    '*' => to_op_binary(BinaryOpType::Mul, value, idx),
-                    '/' => to_op_binary(BinaryOpType::Div, value, idx),
-                    _ => unreachable!(),
-                },
-                None => match value.char_indices().rfind(|(_, c)| matches!(c, '~')) {
-                    Some((idx, c)) => match c {
-                        '~' => to_op_unary(UnaryOpType::BitNot, value, idx),
-                        _ => unreachable!(),
-                    },
-                    None => Ok(None),
-                },
-            },
-        }
-    }
-
-    fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
-        match parse_order_of_operations(literal)? {
-            Some(op) => Ok(Expr::new(Expression::Op(op), Some(literal))),
-            None => match if let Some(hex) = literal.strip_prefix('#') {
-                usize::from_str_radix(hex, 16)
-            } else {
-                usize::from_str(literal)
-            } {
-                Ok(v) => Ok(Expr::new(Expression::Literal(v), Some(literal))),
-                Err(_) => Ok(Expr::new(Expression::Symbol(literal.into()), Some(literal))),
-            },
-        }
-    }
-
     fn parse_expression_list(line: &str) -> Result<Vec<Expr>, SyntaxError> {
         line.split(',')
             .map(parse_expression)
@@ -317,7 +370,7 @@ pub fn assemble<'a>(
     filename: &str,
     source: &'a str,
     rom: (&mut [u8], &mut [u8]),
-) -> Result<HashMap<usize, &'a str>, String> {
+) -> Result<(HashMap<usize, &'a str>, HashMap<&'a str, Expr<'a>>), String> {
     let ast: Vec<(Option<&str>, Option<Directive>, &str)> = make_ast(source).map_err(|e| {
         let mut msg = String::new();
         writeln!(
@@ -341,7 +394,7 @@ pub fn assemble<'a>(
     #[derive(Debug)]
     struct Segment<'a> {
         start: Expr<'a>,
-        label: Rc<str>,
+        label: &'a str,
         assembled: Vec<u8>,
     }
 
@@ -402,7 +455,7 @@ pub fn assemble<'a>(
                             operation: BinaryOpType::Add,
                             operands: Box::new((
                                 Expr::new(
-                                    Expression::Symbol(segments.last().unwrap().label.clone()),
+                                    Expression::Symbol(segments.last().unwrap().label),
                                     Some(l),
                                 ),
                                 Expr::new(
@@ -445,7 +498,7 @@ pub fn assemble<'a>(
                 expr: Expression::Op(Op::BinaryOp(BinaryOp {
                     operation: BinaryOpType::Add,
                     operands: Box::new((
-                        Expr::new(Expression::Symbol(segment.label.clone()), None),
+                        Expr::new(Expression::Symbol(segment.label), None),
                         Expr::new(Expression::Literal(segment.assembled.len()), None),
                     )),
                 })),
@@ -488,7 +541,7 @@ pub fn assemble<'a>(
                         segment_ptr += 1;
                         segments.push(Segment {
                             start: i,
-                            label: ("__segment_".to_owned() + &segment_ptr.to_string()).into(),
+                            label: segment_ptr_to_str(segment_ptr),
                             assembled: Vec::new(),
                         });
                     }
@@ -549,38 +602,6 @@ pub fn assemble<'a>(
                     }),
                 _ => Err(format!("directive {} must have an argument", d.to_str())),
             }?
-        }
-    }
-
-    fn resolve_expression<'a>(
-        expression: &'a Expr<'a>,
-        symbols: &'a HashMap<&'a str, Expr<'a>>,
-    ) -> Result<usize, (&'a str, &'a str)> {
-        match &expression.expr {
-            Expression::Literal(x) => Ok(*x),
-            Expression::Symbol(s) => match symbols.get(s.as_ref()) {
-                Some(sym) => resolve_expression(sym, symbols),
-                None => Err(("symbol not found", expression.debug.expect("no debug info"))),
-            },
-            Expression::Op(op) => match op {
-                Op::UnaryOp(op) => {
-                    let right = resolve_expression(&op.operand, symbols)?;
-                    Ok(match op.operation {
-                        UnaryOpType::BitNot => !right,
-                    })
-                }
-                Op::BinaryOp(op) => {
-                    let (left, right) = op.operands.borrow();
-                    let left: usize = resolve_expression(left, symbols)?;
-                    let right = resolve_expression(right, symbols)?;
-                    Ok(match op.operation {
-                        BinaryOpType::Add => left + right,
-                        BinaryOpType::Sub => left - right,
-                        BinaryOpType::Mul => left * right,
-                        BinaryOpType::Div => left / right,
-                    })
-                }
-            },
         }
     }
 
@@ -712,5 +733,5 @@ pub fn assemble<'a>(
         );
     }
 
-    Ok(resolved_debug_symbols)
+    Ok((resolved_debug_symbols, symbols))
 }

@@ -6,8 +6,6 @@
 
 #![allow(clippy::upper_case_acronyms)]
 
-use std::rc::Rc;
-
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
     CALL(Option<u16>),
@@ -118,7 +116,7 @@ pub enum Op<'a> {
 
 #[derive(Debug, Clone)]
 pub enum Expression<'a> {
-    Symbol(Rc<str>),
+    Symbol(&'a str),
     Literal(usize),
     Op(Op<'a>),
 }
