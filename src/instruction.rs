@@ -4,6 +4,8 @@
 //! represent all the opcodes for the assembler and directives for the assembler
 //! macros could possibly make this smaller, but it's not too big of a deal.
 
+#![allow(clippy::upper_case_acronyms)]
+
 use std::rc::Rc;
 
 #[derive(Debug, Copy, Clone)]
@@ -84,6 +86,18 @@ impl<'a> Expr<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct BinaryOp<'a> {
+    pub operation: BinaryOpType,
+    pub operands: Box<(Expr<'a>, Expr<'a>)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnaryOp<'a> {
+    pub operation: UnaryOpType,
+    pub operand: Box<Expr<'a>>,
+}
+
+#[derive(Debug, Clone)]
 pub enum BinaryOpType {
     Add,
     Sub,
@@ -92,10 +106,21 @@ pub enum BinaryOpType {
 }
 
 #[derive(Debug, Clone)]
+pub enum UnaryOpType {
+    BitNot,
+}
+
+#[derive(Debug, Clone)]
+pub enum Op<'a> {
+    UnaryOp(UnaryOp<'a>),
+    BinaryOp(BinaryOp<'a>),
+}
+
+#[derive(Debug, Clone)]
 pub enum Expression<'a> {
     Symbol(Rc<str>),
     Literal(usize),
-    BinaryOp((BinaryOpType, Box<(Expr<'a>, Expr<'a>)>)),
+    Op(Op<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +139,7 @@ pub type D<'a> = Directive<'a>;
 impl<'a> Directive<'a> {
     pub fn to_str(&self) -> &'static str {
         match self {
-            D::I((i, _)) => i.to_str(),
+            D::I((i, _)) => i.as_str(),
             D::Aorg(_) => "AORG",
             D::Byte(_) => "BYTE",
             D::Data(_) => "DATA",
@@ -215,7 +240,7 @@ impl Instruction {
         matches!(opcode, 0x00..=0x0F | 0x40..=0x6A | 0x6E..=0x7F)
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             I::CALL(_) => "call",
             I::TXA => "txa",
@@ -281,27 +306,27 @@ impl Instruction {
         }
     }
 
-    pub fn set_operand_value(self, value: usize) -> Result<Self, ()> {
+    pub fn set_operand_value<'a>(self, value: usize) -> Result<Self, &'a str> {
         Ok(match self {
-            I::CALL(_) => I::CALL(Some(value.try_into().unwrap())),
-            I::GET(_) => I::GET(Some(value.try_into().unwrap())),
-            I::BR(_) => I::BR(Some(value.try_into().unwrap())),
-            I::ANEC(_) => I::ANEC(Some(value.try_into().unwrap())),
-            I::XGEC(_) => I::XGEC(Some(value.try_into().unwrap())),
-            I::TCX(_) => I::TCX(Some(value.try_into().unwrap())),
-            I::AGEC(_) => I::AGEC(Some(value.try_into().unwrap())),
-            I::ORCM(_) => I::ORCM(Some(value.try_into().unwrap())),
-            I::ANDCM(_) => I::ANDCM(Some(value.try_into().unwrap())),
-            I::TSTCM(_) => I::TSTCM(Some(value.try_into().unwrap())),
-            I::TSTCA(_) => I::TSTCA(Some(value.try_into().unwrap())),
-            I::AXCA(_) => I::AXCA(Some(value.try_into().unwrap())),
-            I::TMAD(_) => I::TMAD(Some(value.try_into().unwrap())),
-            I::TAMD(_) => I::TAMD(Some(value.try_into().unwrap())),
-            I::TCA(_) => I::TCA(Some(value.try_into().unwrap())),
-            I::TMXD(_) => I::TMXD(Some(value.try_into().unwrap())),
-            I::ACAAC(_) => I::ACAAC(Some(value.try_into().unwrap())),
-            I::SBR(_) => I::SBR(Some(value.try_into().unwrap())),
-            _ => Err(())?,
+            I::CALL(_) => I::CALL(Some(value as u16)),
+            I::GET(_) => I::GET(Some(value as u8)),
+            I::BR(_) => I::BR(Some(value as u16)),
+            I::ANEC(_) => I::ANEC(Some(value as u8)),
+            I::XGEC(_) => I::XGEC(Some(value as u8)),
+            I::TCX(_) => I::TCX(Some(value as u8)),
+            I::AGEC(_) => I::AGEC(Some(value as u8)),
+            I::ORCM(_) => I::ORCM(Some(value as u8)),
+            I::ANDCM(_) => I::ANDCM(Some(value as u8)),
+            I::TSTCM(_) => I::TSTCM(Some(value as u8)),
+            I::TSTCA(_) => I::TSTCA(Some(value as u8)),
+            I::AXCA(_) => I::AXCA(Some(value as u8)),
+            I::TMAD(_) => I::TMAD(Some(value as u8)),
+            I::TAMD(_) => I::TAMD(Some(value as u8)),
+            I::TCA(_) => I::TCA(Some(value as u8)),
+            I::TMXD(_) => I::TMXD(Some(value as u8)),
+            I::ACAAC(_) => I::ACAAC(Some(value as u16)),
+            I::SBR(_) => I::SBR(Some(value as u8)),
+            _ => Err("instruction has no operand")?,
         })
     }
 
@@ -370,7 +395,7 @@ impl Instruction {
             I::SBR(Some(x)) => (0x80 | x, None),
             _ => Err(format!(
                 "instruction '{}' must have an argument",
-                self.to_str()
+                self.as_str()
             ))?,
         })
     }

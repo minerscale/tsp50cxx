@@ -3,15 +3,15 @@
 //! This assembler has full unicode support and a syntax highlighting file.
 
 use std::fmt::Write;
-use std::fs::File;
-use std::io::Read;
 use std::ops::Range;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::{borrow::Borrow, collections::HashMap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::instruction::{BinaryOpType, Directive, Expr, Expression, Instruction, D};
+use crate::instruction::{
+    BinaryOp, BinaryOpType, Directive, Expr, Expression, Instruction, Op, UnaryOp, UnaryOpType, D,
+};
 use inline_colorization::*;
 
 #[derive(Debug)]
@@ -20,59 +20,105 @@ struct SyntaxError<'a> {
     slice: &'a str,
 }
 
-fn lstrip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
+fn lstrip_whitespace(value: &str) -> Option<&str> {
     value
         .find(|c: char| !c.is_whitespace())
         .map(|x| &value[x..])
 }
 
-fn rstrip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
-    value.rfind(|c: char| !c.is_whitespace()).and_then(|idx| {
-        match value[idx..].char_indices().nth(1) {
-            Some((next_idx, _)) => Some(&value[..idx + next_idx]),
-            None => Some(&value),
-        }
-    })
+fn rstrip_whitespace(value: &str) -> Option<&str> {
+    value
+        .rfind(|c: char| !c.is_whitespace())
+        .map(|idx| match value[idx..].char_indices().nth(1) {
+            Some((next_idx, _)) => &value[..idx + next_idx],
+            None => value,
+        })
 }
 
-fn strip_whitespace<'a>(value: &'a str) -> Option<&'a str> {
+fn strip_whitespace(value: &str) -> Option<&str> {
     lstrip_whitespace(value).and_then(|x| rstrip_whitespace(x))
 }
 
-fn split_order_of_operations<'a>(value: &'a str) -> Option<(BinaryOpType, (&'a str, &'a str))> {
-    value
-        .split_once('*')
-        .map(|x| (BinaryOpType::Mul, x))
-        .or(value
-            .split_once('/')
-            .map(|x| (BinaryOpType::Div, x))
-            .or(value
-                .split_once('+')
-                .map(|x| (BinaryOpType::Add, x))
-                .or(value.split_once('-').map(|x| (BinaryOpType::Sub, x)))))
-}
+type AstFrame<'a> = (Option<&'a str>, Option<Directive<'a>>, &'a str);
 
-fn make_ast<'a>(
-    source: &'a [&'a str],
-) -> Result<Vec<(Option<&'a str>, Option<Directive<'a>>)>, SyntaxError<'a>> {
-    fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
-        match split_order_of_operations(literal) {
-            Some((op, (left, right))) => Ok(Expr::new(
-                Expression::BinaryOp((
-                    op,
-                    Box::new((
-                        parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
-                            msg: vec!["must have expression left of '+' operator"],
-                            slice: left,
-                        })?)?,
-                        parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
-                            msg: vec!["must have expression right of '+' operator"],
-                            slice: right,
-                        })?)?,
-                    )),
+fn make_ast(source: &str) -> Result<Vec<AstFrame>, SyntaxError> {
+    fn parse_order_of_operations(value: &str) -> Result<Option<Op>, SyntaxError> {
+        fn to_op_binary(
+            op_type: BinaryOpType,
+            value: &str,
+            idx: usize,
+        ) -> Result<Option<Op>, SyntaxError> {
+            let (left, right) = (
+                &value[..idx],
+                value
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| &value[idx + i..])
+                    .unwrap_or(&value[idx..idx]),
+            );
+            Ok(Some(Op::BinaryOp(BinaryOp {
+                operation: op_type,
+                operands: Box::new((
+                    parse_expression(strip_whitespace(left).ok_or_else(|| SyntaxError {
+                        msg: vec!["must have expression to the left of a binary operator"],
+                        slice: left,
+                    })?)?,
+                    parse_expression(strip_whitespace(right).ok_or_else(|| SyntaxError {
+                        msg: vec!["must have expression the right of a binary operator"],
+                        slice: right,
+                    })?)?,
                 )),
-                Some(literal),
-            )),
+            })))
+        }
+
+        fn to_op_unary(
+            op_type: UnaryOpType,
+            value: &str,
+            idx: usize,
+        ) -> Result<Option<Op>, SyntaxError> {
+            let right = value
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| &value[idx + i..])
+                .unwrap_or(&value[idx..idx]);
+
+            Ok(Some(Op::UnaryOp(UnaryOp {
+                operation: op_type,
+                operand: Box::new(parse_expression(strip_whitespace(right).ok_or_else(
+                    || SyntaxError {
+                        msg: vec!["must have expression right of a unary operator"],
+                        slice: right,
+                    },
+                )?)?),
+            })))
+        }
+
+        match value.char_indices().rfind(|(_, c)| matches!(c, '+' | '-')) {
+            Some((idx, c)) => match c {
+                '+' => to_op_binary(BinaryOpType::Add, value, idx),
+                '-' => to_op_binary(BinaryOpType::Sub, value, idx),
+                _ => unreachable!(),
+            },
+            None => match value.char_indices().rfind(|(_, c)| matches!(c, '*' | '/')) {
+                Some((idx, c)) => match c {
+                    '*' => to_op_binary(BinaryOpType::Mul, value, idx),
+                    '/' => to_op_binary(BinaryOpType::Div, value, idx),
+                    _ => unreachable!(),
+                },
+                None => match value.char_indices().rfind(|(_, c)| matches!(c, '~')) {
+                    Some((idx, c)) => match c {
+                        '~' => to_op_unary(UnaryOpType::BitNot, value, idx),
+                        _ => unreachable!(),
+                    },
+                    None => Ok(None),
+                },
+            },
+        }
+    }
+
+    fn parse_expression(literal: &str) -> Result<Expr, SyntaxError> {
+        match parse_order_of_operations(literal)? {
+            Some(op) => Ok(Expr::new(Expression::Op(op), Some(literal))),
             None => match if let Some(hex) = literal.strip_prefix('#') {
                 usize::from_str_radix(hex, 16)
             } else {
@@ -86,7 +132,7 @@ fn make_ast<'a>(
 
     fn parse_expression_list(line: &str) -> Result<Vec<Expr>, SyntaxError> {
         line.split(',')
-            .map(|s| parse_expression(s))
+            .map(parse_expression)
             .collect::<Result<Vec<_>, _>>()
     }
 
@@ -94,7 +140,7 @@ fn make_ast<'a>(
         label: Option<&'a str>,
         directive: Directive<'a>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
+    ) -> Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>> {
         match match line
             .char_indices()
             .find(|(_, c)| !c.is_whitespace())
@@ -144,21 +190,21 @@ fn make_ast<'a>(
             Ok(None) => Ok(directive),
             Err(e) => Err(e),
         } {
-            Ok(directive) => Some(Ok((label, Some(directive)))),
-            Err(e) => Some(Err(e)),
+            Ok(directive) => Ok((label, Some(directive))),
+            Err(e) => Err(e),
         }
     }
 
     fn parse_keyword_or_label<'a>(
         label: Option<&'a str>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
+    ) -> Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>> {
         let get_directive = |s| match Directive::try_from(s) {
-            Ok(d) => Some(Ok((label, Some(d)))),
-            Err(_) => Some(Err(SyntaxError {
+            Ok(d) => Ok((label, Some(d))),
+            Err(_) => Err(SyntaxError {
                 msg: vec!["directive not recognised"],
                 slice: s,
-            })),
+            }),
         };
 
         match line
@@ -169,7 +215,7 @@ fn make_ast<'a>(
                 match c {
                     // Label
                     ':' => line[idx..].char_indices().nth(1).map_or(
-                        Some(Ok((Some(&line[..idx]), None))),
+                        Ok((Some(&line[..idx]), None)),
                         |(after_colon, _)| {
                             parse_line(Some(&line[..idx]), &line[(idx + after_colon)..])
                         },
@@ -179,10 +225,10 @@ fn make_ast<'a>(
                     // Keyword, get operand and strip whitespace on both sides
                     _ => match Directive::try_from(&line[..idx]) {
                         Ok(d) => parse_argument(label, d, &line[idx..]),
-                        Err(_) => Some(Err(SyntaxError {
+                        Err(_) => Err(SyntaxError {
                             msg: vec!["directive not recognised"],
                             slice: &line[..idx],
-                        })),
+                        }),
                     },
                 }
             }
@@ -193,22 +239,22 @@ fn make_ast<'a>(
     fn parse_line<'a>(
         label: Option<&'a str>,
         line: &'a str,
-    ) -> Option<Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>>> {
+    ) -> Result<(Option<&'a str>, Option<Directive<'a>>), SyntaxError<'a>> {
         line.char_indices()
             .find(|(_, c)| !c.is_whitespace())
-            .and_then(|(idx, c)| match c {
-                '%' => None,
+            .map(|(idx, c)| match c {
+                '%' => Ok((label, None)),
                 _ => parse_keyword_or_label(label, &line[idx..]),
             })
+            .unwrap_or(Ok((label, None)))
     }
 
     source
-        .into_iter()
-        .filter_map(|&line| {
-            parse_line(None, line).map(|x| match x {
-                Ok((label, directive)) => Ok((label, directive)),
-                Err(e) => Err(e),
-            })
+        .lines()
+        .filter_map(|line| match parse_line(None, line) {
+            Ok((None, None)) => None,
+            Ok((label, directive)) => Some(Ok((label, directive, line))),
+            Err(e) => Some(Err(e)),
         })
         .collect()
 }
@@ -233,7 +279,6 @@ fn draw_line(
     let line_number = line_number + 1; // Stupid humans start their line numbers at 1
     let padding = " ".repeat(line_number.to_string().len());
 
-    // In any other language this wouldn't be hacky
     {
         let column = squiggly.as_bytes().as_ptr_range().start as usize - line.as_ptr() as usize;
 
@@ -268,15 +313,12 @@ fn draw_line(
     }
 }
 
-pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
-    let mut source = String::new();
-    File::open(filename)
-        .map_err(|_| format!("{style_bold}{color_red}error{color_reset}: unable to open source file '{filename}'{style_reset}"))?
-        .read_to_string(&mut source)
-        .map_err(|_| format!("{style_bold}{color_red}error{color_reset}: unable to read source file '{filename}'{style_reset}"))?;
-
-    let source_lines = source.lines().collect::<Vec<_>>();
-    let ast: Vec<(Option<&str>, Option<Directive>)> = make_ast(&source_lines).map_err(|e| {
+pub fn assemble<'a>(
+    filename: &str,
+    source: &'a str,
+    rom: (&mut [u8], &mut [u8]),
+) -> Result<HashMap<usize, &'a str>, String> {
+    let ast: Vec<(Option<&str>, Option<Directive>, &str)> = make_ast(source).map_err(|e| {
         let mut msg = String::new();
         writeln!(
             msg,
@@ -284,7 +326,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
             e.msg.concat()
         )
         .unwrap();
-        draw_line(&mut msg, &source, filename, e.slice, SquigglyColor::Red);
+        draw_line(&mut msg, source, filename, e.slice, SquigglyColor::Red);
 
         msg
     })?;
@@ -327,7 +369,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
 
         draw_line(
             &mut err,
-            &source,
+            source,
             filename,
             error_squiggly,
             SquigglyColor::Red,
@@ -340,7 +382,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         .unwrap();
         draw_line(
             &mut err,
-            &source,
+            source,
             filename,
             warning_squiggly,
             SquigglyColor::Green,
@@ -348,15 +390,17 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         err
     }
 
-    for (label, directive) in ast {
+    let mut debug_symbols: Vec<Expr> = Vec::new();
+
+    for (label, directive, line) in ast {
         if !matches!(directive, Some(D::Equ(_))) {
             if let Some(l) = label {
                 if let Some(e) = symbols.insert(
                     l,
                     Expr::new(
-                        Expression::BinaryOp((
-                            BinaryOpType::Add,
-                            Box::new((
+                        Expression::Op(Op::BinaryOp(BinaryOp {
+                            operation: BinaryOpType::Add,
+                            operands: Box::new((
                                 Expr::new(
                                     Expression::Symbol(segments.last().unwrap().label.clone()),
                                     Some(l),
@@ -366,12 +410,12 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                                     Some(l),
                                 ),
                             )),
-                        )),
-                        None,
+                        })),
+                        Some(l),
                     ),
                 ) {
                     Err(used_twice_err(
-                        &source,
+                        source,
                         filename,
                         l,
                         e.debug.expect("no debug info"),
@@ -381,7 +425,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         }
 
         fn write_opcode(instruction: &Instruction, assembled: &mut Vec<u8>) -> Result<(), String> {
-            Ok(match instruction.to_opcode()? {
+            match instruction.to_opcode()? {
                 (i, None) => {
                     assembled.push(i);
                 }
@@ -389,17 +433,34 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                     assembled.push(i);
                     assembled.push(o);
                 }
-            })
+            };
+
+            Ok(())
         }
 
         let segment = segments.last_mut().unwrap();
 
-        match directive {
-            Some(d) => match d {
+        let mut push_debug_symbol = || {
+            debug_symbols.push(Expr {
+                expr: Expression::Op(Op::BinaryOp(BinaryOp {
+                    operation: BinaryOpType::Add,
+                    operands: Box::new((
+                        Expr::new(Expression::Symbol(segment.label.clone()), None),
+                        Expr::new(Expression::Literal(segment.assembled.len()), None),
+                    )),
+                })),
+                debug: Some(line),
+            });
+        };
+
+        if let Some(d) = directive {
+            match d {
                 Directive::I((instruction, None)) => {
+                    push_debug_symbol();
                     write_opcode(&instruction, &mut segment.assembled)
                 }
                 Directive::I((instruction, Some(_))) => {
+                    push_debug_symbol();
                     references.push(Reference {
                         segment: segment_ptr,
                         byte: segment.assembled.len(),
@@ -435,19 +496,25 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                     Ok(())
                 }
                 Directive::Byte(Some(ref expr_list)) => {
+                    push_debug_symbol();
+                    let old_len = segment.assembled.len();
+
                     for _ in expr_list {
                         segment.assembled.push(Default::default());
                     }
 
                     references.push(Reference {
                         segment: segment_ptr,
-                        byte: segment.assembled.len(),
+                        byte: old_len,
                         directive: d,
                     });
 
                     Ok(())
                 }
                 Directive::Data(Some(ref expr_list)) => {
+                    push_debug_symbol();
+                    let old_len = segment.assembled.len();
+
                     for _ in expr_list {
                         segment.assembled.push(Default::default());
                         segment.assembled.push(Default::default());
@@ -455,13 +522,14 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
 
                     references.push(Reference {
                         segment: segment_ptr,
-                        byte: segment.assembled.len(),
+                        byte: old_len,
                         directive: d,
                     });
 
                     Ok(())
                 }
                 Directive::Text(Some(i)) => {
+                    push_debug_symbol();
                     for &byte in i.as_bytes() {
                         segment.assembled.push(byte);
                     }
@@ -472,7 +540,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                     .ok_or("EQU directive must have symbol to define".to_string())
                     .and_then(|l| match symbols.insert(l, expr) {
                         Some(x) => Err(used_twice_err(
-                            &source,
+                            source,
                             filename,
                             l,
                             x.debug.expect("no debug info"),
@@ -480,8 +548,7 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
                         None => Ok(()),
                     }),
                 _ => Err(format!("directive {} must have an argument", d.to_str())),
-            }?,
-            None => (),
+            }?
         }
     }
 
@@ -492,22 +559,28 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         match &expression.expr {
             Expression::Literal(x) => Ok(*x),
             Expression::Symbol(s) => match symbols.get(s.as_ref()) {
-                Some(ref sym) => resolve_expression(&sym, symbols),
+                Some(sym) => resolve_expression(sym, symbols),
                 None => Err(("symbol not found", expression.debug.expect("no debug info"))),
             },
-            Expression::BinaryOp(x) => {
-                let (op, (left, right)) = (&x.0, x.1.borrow());
-
-                let left: usize = resolve_expression(&left, symbols)?;
-                let right = resolve_expression(&right, symbols)?;
-
-                Ok(match op {
-                    BinaryOpType::Add => left + right,
-                    BinaryOpType::Sub => left - right,
-                    BinaryOpType::Mul => left * right,
-                    BinaryOpType::Div => left / right,
-                })
-            }
+            Expression::Op(op) => match op {
+                Op::UnaryOp(op) => {
+                    let right = resolve_expression(&op.operand, symbols)?;
+                    Ok(match op.operation {
+                        UnaryOpType::BitNot => !right,
+                    })
+                }
+                Op::BinaryOp(op) => {
+                    let (left, right) = op.operands.borrow();
+                    let left: usize = resolve_expression(left, symbols)?;
+                    let right = resolve_expression(right, symbols)?;
+                    Ok(match op.operation {
+                        BinaryOpType::Add => left + right,
+                        BinaryOpType::Sub => left - right,
+                        BinaryOpType::Mul => left * right,
+                        BinaryOpType::Div => left / right,
+                    })
+                }
+            },
         }
     }
 
@@ -519,79 +592,109 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         )
         .unwrap();
 
-        draw_line(&mut err, &source, filename, squiggly, SquigglyColor::Red);
+        draw_line(&mut err, source, filename, squiggly, SquigglyColor::Red);
         err
     }
 
-    let mut segment_layout: Vec<(usize, Range<*const u8>)> = Vec::new();
+    enum RomLocation {
+        Rom,
+        ExcitationRom,
+    }
+
+    let mut segment_layout: Vec<(RomLocation, usize, Range<*const u8>)> = Vec::new();
     // resolve segments
     for (idx, segment) in segments.iter().enumerate() {
         let lower = resolve_expression(&segment.start, &symbols)
-            .map_err(|(msg, squiggly)| make_error_msg(msg, squiggly, &source, filename))?;
+            .map_err(|(msg, squiggly)| make_error_msg(msg, squiggly, source, filename))?;
         symbols.insert(&segment.label, Expr::new(Expression::Literal(lower), None));
-
         let upper = lower + segment.assembled.len();
 
-        let a = memory[lower..upper].as_ptr_range();
-        for (_, b) in &segment_layout {
-            if (b.start <= a.start && a.start < b.end) || (b.start <= a.end && a.end < b.end) {
-                panic!("uh oh spaghettio AORG clobbo'd your data")
-            }
-        }
-        segment_layout.push((idx, memory[lower..upper].as_ptr_range()));
+        if lower >= 0x4000 {
+            let lower = lower - 0x4000;
+            let upper = upper - 0x4000;
 
-        memory[lower..upper].copy_from_slice(&segment.assembled);
+            let a = rom.1[lower..upper].as_ptr_range();
+            for (_, _, b) in &segment_layout {
+                if (b.start <= a.start && a.start < b.end) || (b.start <= a.end && a.end < b.end) {
+                    panic!("uh oh spaghettio AORG clobbo'd your data")
+                }
+            }
+            segment_layout.push((
+                RomLocation::ExcitationRom,
+                idx,
+                rom.1[lower..upper].as_ptr_range(),
+            ));
+
+            rom.1[lower..upper].copy_from_slice(&segment.assembled);
+        } else {
+            let a = rom.0[lower..upper].as_ptr_range();
+            for (_, _, b) in &segment_layout {
+                if (b.start <= a.start && a.start < b.end) || (b.start <= a.end && a.end < b.end) {
+                    panic!("uh oh spaghettio AORG clobbo'd your data")
+                }
+            }
+            segment_layout.push((RomLocation::Rom, idx, rom.0[lower..upper].as_ptr_range()));
+
+            rom.0[lower..upper].copy_from_slice(&segment.assembled);
+        }
     }
 
     for r in references {
-        let write_idx = (segment_layout
+        let (location, _, range) = segment_layout
             .iter()
-            .find(|(s, _)| *s == r.segment)
-            .unwrap()
-            .1
-            .start as usize
-            - memory.as_ptr() as usize)
-            + r.byte;
+            .find(|(_, s, _)| *s == r.segment)
+            .unwrap();
+
+        let (buf, write_idx) = match location {
+            RomLocation::Rom => {
+                let idx = range.start as usize - rom.0.as_ptr() as usize + r.byte;
+                (&mut *rom.0, idx)
+            }
+            RomLocation::ExcitationRom => {
+                let idx = range.start as usize - rom.1.as_ptr() as usize + r.byte;
+                (&mut *rom.1, idx)
+            }
+        };
 
         match r.directive {
             Directive::I((i, expr)) => {
                 match i
-                    .set_operand_value(resolve_expression(&expr.unwrap(), &symbols).map_err(
-                        |(msg, squiggly)| make_error_msg(msg, squiggly, &source, filename),
-                    )?)
-                    .unwrap()
+                    .set_operand_value(
+                        resolve_expression(expr.as_ref().unwrap(), &symbols).map_err(
+                            |(msg, squiggly)| make_error_msg(msg, squiggly, source, filename),
+                        )?,
+                    )
+                    .map_err(|msg| {
+                        make_error_msg(msg, expr.as_ref().unwrap().debug.unwrap(), source, filename)
+                    })?
                     .to_opcode()
                     .unwrap()
                 {
                     (x, None) => {
-                        memory[write_idx] = x;
+                        buf[write_idx] = x;
                     }
                     (x, Some(y)) => {
-                        memory[write_idx] = x;
-                        memory[write_idx + 1] = y;
+                        buf[write_idx] = x;
+                        buf[write_idx + 1] = y;
                     }
                 }
             }
             Directive::Byte(x) => {
                 for (idx, e) in x.unwrap().iter().enumerate() {
-                    memory[write_idx + idx] = resolve_expression(&e, &symbols)
-                        .map_err(|(msg, squiggly)| {
-                            make_error_msg(msg, squiggly, &source, filename)
-                        })?
+                    buf[write_idx + idx] = resolve_expression(e, &symbols)
+                        .map_err(|(msg, squiggly)| make_error_msg(msg, squiggly, source, filename))?
                         .try_into()
                         .unwrap();
                 }
             }
             Directive::Data(x) => {
                 for (idx, e) in x.unwrap().iter().enumerate() {
-                    let val: u16 = resolve_expression(&e, &symbols)
-                        .map_err(|(msg, squiggly)| {
-                            make_error_msg(msg, squiggly, &source, filename)
-                        })?
+                    let val: u16 = resolve_expression(e, &symbols)
+                        .map_err(|(msg, squiggly)| make_error_msg(msg, squiggly, source, filename))?
                         .try_into()
                         .unwrap();
-                    memory[write_idx + 2 * idx] = (val >> 8) as u8;
-                    memory[write_idx + 2 * idx + 1] = val as u8;
+                    buf[write_idx + 2 * idx] = (val >> 8) as u8;
+                    buf[write_idx + 2 * idx + 1] = val as u8;
                 }
             }
             Directive::Aorg(_) => unreachable!(),
@@ -600,9 +703,14 @@ pub fn assemble(filename: &str, memory: &mut [u8]) -> Result<(), String> {
         }
     }
 
-    for s in &symbols {
-        println!("{s:?}");
+    let mut resolved_debug_symbols: HashMap<usize, &str> = HashMap::new();
+
+    for expr in debug_symbols {
+        resolved_debug_symbols.insert(
+            resolve_expression(&expr, &symbols).unwrap(),
+            expr.debug.unwrap(),
+        );
     }
 
-    Ok(())
+    Ok(resolved_debug_symbols)
 }

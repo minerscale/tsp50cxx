@@ -2,8 +2,6 @@
 //!
 //! This software is based on the TSP50C0X/1X spec from https://www.ti.com/lit/ml/spss011d/spss011d.pdf
 
-#![allow(clippy::upper_case_acronyms)]
-
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
 use std::{
@@ -171,9 +169,12 @@ pub struct TSP50 {
     interrupt_1: Interrupt1,
     interrupt_2: Interrupt2,
 
+    has_run_tmad: bool,
+
     synthesis_mem: [Uninit<u12>; 16],
     mem: [Uninit<u8>; 120],
     rom: [u8; 16384],
+    excitation_rom: [u8; 384],
 }
 
 impl fmt::Debug for TSP50 {
@@ -190,6 +191,7 @@ impl Default for TSP50 {
             stack: Default::default(),
             interrupt_1: Default::default(),
             interrupt_2: Default::default(),
+            has_run_tmad: Default::default(),
             a: Default::default(),
             x: Default::default(),
             b: Default::default(),
@@ -212,6 +214,7 @@ impl Default for TSP50 {
             synthesis_mem: [Default::default(); 16],
             mem: [Default::default(); 120],
             rom: [Default::default(); 16384],
+            excitation_rom: [Default::default(); 384],
         }
     }
 }
@@ -224,15 +227,16 @@ impl TSP50 {
     pub fn run(&mut self) {
         while self.step() == Status::Continue {
             println!("{:?}", self);
+            std::thread::sleep(std::time::Duration::from_millis(100))
         }
     }
 
-    pub fn rom_mut(&mut self) -> &mut [u8] {
-        return &mut self.rom;
+    pub fn rom_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        (&mut self.rom, &mut self.excitation_rom)
     }
 
     pub fn rom(&mut self) -> &[u8] {
-        return &self.rom;
+        &self.rom
     }
 
     fn handle_interrupts(&mut self) {
@@ -326,12 +330,13 @@ impl TSP50 {
 
     fn sign_extend_8_to_14_if_extended_sign(&self, a: u8) -> u14 {
         let a = a as u16;
-        u14::new(match self.integer_mode.unwrap() {
-            IntegerMode::ExtSign => match a >= 0x80 {
-                true => a | 0x3F00,
-                false => a,
+
+        u14::new(match a >= 0x80 {
+            true => match self.integer_mode.unwrap() {
+                IntegerMode::ExtSign => a | 0x3F00,
+                IntegerMode::Integer => a,
             },
-            IntegerMode::Integer => a,
+            false => a,
         })
     }
 
@@ -393,7 +398,8 @@ impl TSP50 {
 
             0x10..=0x7F | 0x81..=0x83 | 0x85..=0x87 => self.mem[addr - 0x10] = Uninit::Some(val),
 
-            0x80 | 0x84 => panic!("Attempt to write to read only Data Input Register"),
+            // Attempt to write to read only Data Input Register
+            0x80 | 0x84 => (),
             _ => panic!("Attempt to write to unmapped memory"),
         }
     }
@@ -548,7 +554,7 @@ impl TSP50 {
                     );
                 };
 
-                if bits_left <= operand {
+                let bits_to_take = if bits_left <= operand {
                     // Drain the parallel to serial register into A
                     if bits_left > 0 {
                         take_bits(self, bits_left);
@@ -559,14 +565,15 @@ impl TSP50 {
                     self.ps_bits_left = Uninit::Some(8);
                     self.ps_buf = Uninit::Some(None);
                     self.set_status(true);
+                    operand - bits_left
                 } else {
                     self.set_status(false);
-                }
+                    operand
+                };
 
-                let bits_left = operand - bits_left;
-                if bits_left > 0 {
-                    take_bits(self, bits_left);
-                    self.ps = Uninit::Some(self.ps.unwrap() - bits_left);
+                if bits_to_take > 0 {
+                    take_bits(self, bits_to_take);
+                    self.ps = Uninit::Some(self.ps.unwrap() >> bits_to_take);
                 }
 
                 /* From the spec:
@@ -771,7 +778,16 @@ impl TSP50 {
             }
             I::TMAD(Some(operand)) => {
                 self.set_status(true);
-                self.a = Uninit::Some(self.read_mem_sign_extend(operand));
+
+                // From the spec:
+                // The first TMAD instruction after power up is not guaranteed to function correcty.
+                if !self.has_run_tmad {
+                    self.a = Default::default(); // clobber the A register
+                    self.has_run_tmad = true;
+                } else {
+                    self.set_status(true);
+                    self.a = Uninit::Some(self.read_mem_sign_extend(operand));
+                }
             }
             I::TMAIX => {
                 self.set_status(true);

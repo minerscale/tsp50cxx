@@ -21,19 +21,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1804bdb6a9784758b200007273a8b84e2b0b0b97a8f1e18e763eceb3e9f98a"
 
 [[package]]
-name = "slicevec"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9838ecc3fa06da0341f601a6efb7744e728a4f2761c31b163f1f4c524c942df8"
-
-[[package]]
 name = "tsp50cxx"
 version = "0.1.0"
 dependencies = [
  "arbitrary-int",
  "bitflags",
  "inline_colorization",
- "slicevec",
  "unicode-width",
 ]
 
