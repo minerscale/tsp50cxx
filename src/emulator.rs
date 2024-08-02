@@ -6,6 +6,8 @@ use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
 use std::{
     fmt::{self, Debug},
+    fs::File,
+    io::Write,
     ops::{Index, IndexMut},
 };
 
@@ -144,7 +146,7 @@ struct Interrupt2 {
 }
 
 pub struct TSP50 {
-    num_cycles: usize,
+    pub num_cycles: usize,
     stack: Stack,
     pc: u14,
     a: Uninit<u14>,
@@ -157,6 +159,7 @@ pub struct TSP50 {
     timer_prescale_count: u8,
     timer_begun: bool,
     pitch: Uninit<u14>,
+    pitch_period_counter: Uninit<u14>,
     dac: Uninit<i16>,
     excitation: Uninit<u14>,
     sar: Uninit<u14>,
@@ -165,6 +168,9 @@ pub struct TSP50 {
     ps_bits_left: Uninit<u8>,
     mode: Mode,
     random: u16,
+    excitation_ptr: usize,
+
+    pcm_out: Option<File>,
 
     interrupt_1: Interrupt1,
     interrupt_2: Interrupt2,
@@ -175,6 +181,9 @@ pub struct TSP50 {
     mem: [Uninit<u8>; 120],
     rom: [u8; 16384],
     excitation_rom: [u8; 384],
+    previous_samples: [u32; 12],
+
+    num_samples: usize,
 }
 
 impl fmt::Debug for TSP50 {
@@ -202,6 +211,7 @@ impl Default for TSP50 {
             timer_prescale_count: Default::default(),
             timer_begun: Default::default(),
             pitch: Default::default(),
+            pitch_period_counter: Default::default(),
             dac: Default::default(),
             excitation: Default::default(),
             sar: Default::default(),
@@ -210,11 +220,15 @@ impl Default for TSP50 {
             ps_bits_left: Default::default(),
             mode: Default::default(),
             random: Default::default(),
+            excitation_ptr: Default::default(),
+            pcm_out: Default::default(),
             num_cycles: Default::default(),
             synthesis_mem: [Default::default(); 16],
             mem: [Default::default(); 120],
             rom: [Default::default(); 16384],
             excitation_rom: [Default::default(); 384],
+            previous_samples: [Default::default(); 12],
+            num_samples: Default::default(),
         }
     }
 }
@@ -230,6 +244,10 @@ impl TSP50 {
 
     pub fn pc(&self) -> &u14 {
         &self.pc
+    }
+
+    pub fn set_pcm_file(&mut self, f: File) {
+        self.pcm_out = Some(f);
     }
 
     fn handle_interrupts(&mut self) {
@@ -567,6 +585,7 @@ impl TSP50 {
                 if bits_to_take > 0 {
                     take_bits(self, bits_to_take);
                     self.ps = Uninit::Some(self.ps.unwrap() >> bits_to_take);
+                    self.ps_bits_left = Uninit::Some(self.ps_bits_left.unwrap() - bits_to_take);
                 }
 
                 /* From the spec:
@@ -626,7 +645,18 @@ impl TSP50 {
                 self.write_mem_8(mem | operand, addr);
             }
             I::RETI => {
-                match (self.mode.contains(Mode::ENA1), self.mode.contains(Mode::ENA2), &self.interrupt_1.state, &self.interrupt_2.state) {
+                match (
+                    self.mode.contains(Mode::ENA1),
+                    self.mode.contains(Mode::ENA2),
+                    &self.interrupt_1.state,
+                    &self.interrupt_2.state,
+                ) {
+                    (true, _, Interrupt::Inactive, _) => {
+                        panic!("From the spec: If a RETI instruction is executed with interrupts enabled and without an interrupt first occurring, the stack control can be corrupted.");
+                    }
+                    (_, true, _, Interrupt::Inactive) => {
+                        panic!("From the spec: If a RETI instruction is executed with interrupts enabled and without an interrupt first occurring, the stack control can be corrupted.");
+                    }
                     // Return from interrupt 1
                     (_, _, Interrupt::Active, _) => {
                         self.a = self.interrupt_1.a;
@@ -635,18 +665,20 @@ impl TSP50 {
                         self.status = self.interrupt_1.status;
                         self.integer_mode = self.interrupt_1.integer_mode;
                         self.pc = self.stack.pop();
-                    },
+                        self.interrupt_1.state = Interrupt::Inactive;
+                    }
                     // Return from interrupt 2
                     (_, _, _, Interrupt::Active) => {
                         self.status = self.interrupt_2.status;
                         self.integer_mode = self.interrupt_2.integer_mode;
-                    },
+                        self.interrupt_2.state = Interrupt::Inactive;
+                    }
                     // If a RETI is executed with interrupts disabled, any interrupt pending flag is cleared.
                     (false, false, _, _) => {
                         self.interrupt_1.state = Interrupt::Inactive;
                         self.interrupt_2.state = Interrupt::Inactive;
-                    },
-                    _ => panic!("From the spec: If a RETI instruction is executed with interrupts enabled and without an interrupt first occurring, the stack control can be corrupted.")
+                    }
+                    _ => unreachable!(),
                 }
             }
             I::RETN => {
@@ -719,7 +751,15 @@ impl TSP50 {
             }
             I::TAMODE => {
                 self.set_status(true);
+                let prev_mode = self.mode;
+
                 self.mode = Mode::from_bits(self.a.unwrap().value() as u8).unwrap();
+
+                // Have we just enabled LPC mode?
+                if !prev_mode.contains(Mode::LPC) && self.mode.contains(Mode::LPC) {
+                    // initialise the PPC
+                    self.pitch_period_counter = Uninit::Some(u14::new(0));
+                }
             }
             I::TAPSC => {
                 self.set_status(true);
@@ -830,13 +870,85 @@ impl TSP50 {
             _ => panic!("attempt to use opcode with None operand"),
         };
 
+        let last_cycles = self.num_cycles;
         let cycles = instruction.cycles();
-        self.num_cycles += cycles;
+        let lpc_active = self.mode.contains(Mode::LPC);
+        self.num_cycles += cycles * if lpc_active { 34 } else { 16 };
+
+        // Pitch period counter emulation
+        if lpc_active {
+            // The LPC filter is running at approximately 10 kHz, then
+            // the DAC is running at approximately 20 kHz
+
+            // Speech sample rate: 7.86MHz / 8Khz = 960
+            if last_cycles / 960 != self.num_cycles / 960 {
+                // Are we voiced or unvoiced?
+                let sample = if self.mode.contains(Mode::UNV) {
+                    // sample from random register
+                    u14::new(self.random & 0x3FFF)
+                } else {
+                    if self.excitation_ptr < self.excitation_rom.len() {
+                        // sample from activation function
+                        let sample = ((self.excitation_rom[self.excitation_ptr] as u16) << 8)
+                            | (self.excitation_rom[self.excitation_ptr + 1] as u16);
+                        self.excitation_ptr += 2;
+ 
+                        assert!(sample < 0x4000);
+                        u14::new(sample)
+                    } else {
+                        u14::new(0)
+                    }
+                };
+
+                let sample: u32 = (sample.value() as u32)
+                    * (self.synthesis_mem[1].unwrap().value() as u32);
+
+                self.previous_samples[self.num_samples % self.previous_samples.len()] = sample;
+
+                let mut filtered_sample: usize = 0;
+                for k in 1..=12 {
+                    filtered_sample += (self.synthesis_mem[k + 1].unwrap().value() as usize)
+                        * (self.previous_samples[(self.num_samples + self.previous_samples.len()
+                            - k)
+                            % self.previous_samples.len()] as usize)
+                }
+
+                filtered_sample = filtered_sample >> 25;
+
+                // write sample for analysis
+                self.pcm_out
+                    .as_ref()
+                    .unwrap()
+                    .write(&[filtered_sample as u8, (filtered_sample >> 8) as u8])
+                    .unwrap();
+
+                let (mut ppc, underflow) = self
+                    .pitch_period_counter
+                    .unwrap()
+                    .overflowing_sub(u14::new(0x20));
+
+                if underflow {
+                    ppc = ppc.wrapping_add(self.pitch.unwrap());
+                    self.excitation_ptr = 0;
+                }
+
+                if (underflow || self.pitch_period_counter.unwrap().value() >= 0x200)
+                    && ppc.value() < 0x200
+                {
+                    self.interrupt_1.state = Interrupt::Requested;
+                }
+
+                self.pitch_period_counter = Uninit::Some(ppc);
+            }
+
+            self.num_samples += 1;
+        }
 
         if self.timer_begun {
-            let timer_prescale = self.timer_prescale.unwrap();
-            let next_count = self.timer_prescale_count as usize + cycles;
-            let denom = (timer_prescale as usize) + 1;
+            let num_timer_pulses = (self.num_cycles - last_cycles) / 16;
+
+            let next_count = self.timer_prescale_count as usize + num_timer_pulses;
+            let denom = (self.timer_prescale.unwrap() as usize) + 1;
             let num_overflows: u8 = (next_count / denom).try_into().unwrap();
             let rem = next_count % denom;
 

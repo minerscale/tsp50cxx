@@ -202,7 +202,7 @@ C1_Value:   EQU #F61             % C1 Value
 C2_Value:   EQU #F61             % C2 Value
 MAX_RAM:    EQU #7F              % Highest RAM location
 %
-%   Speceal Energy Values
+%   Special Energy Values
 %
 ESTOP:      EQU 15               % Stop code
 ESILENCE:   EQU 0                % Silence code
@@ -1207,7 +1207,7 @@ stop:       tcx     MODE_BUF
             tamode            % set mode per above setting
             cla
             tasyn             % write a zero to the DAC
-            tca     #F
+            tca     #FA
 back:       iac               % wait for a minimum of 30
             br      out       %   instruction cycles
             br      back
