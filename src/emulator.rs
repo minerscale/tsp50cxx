@@ -181,7 +181,7 @@ pub struct TSP50 {
     mem: [Uninit<u8>; 120],
     rom: [u8; 16384],
     excitation_rom: [u8; 384],
-    previous_samples: [u32; 12],
+    previous_samples: [f64; 12],
 
     num_samples: usize,
 }
@@ -882,46 +882,6 @@ impl TSP50 {
 
             // Speech sample rate: 7.86MHz / 8Khz = 960
             if last_cycles / 960 != self.num_cycles / 960 {
-                // Are we voiced or unvoiced?
-                let sample = if self.mode.contains(Mode::UNV) {
-                    // sample from random register
-                    u14::new(self.random & 0x3FFF)
-                } else {
-                    if self.excitation_ptr < self.excitation_rom.len() {
-                        // sample from activation function
-                        let sample = ((self.excitation_rom[self.excitation_ptr] as u16) << 8)
-                            | (self.excitation_rom[self.excitation_ptr + 1] as u16);
-                        self.excitation_ptr += 2;
- 
-                        assert!(sample < 0x4000);
-                        u14::new(sample)
-                    } else {
-                        u14::new(0)
-                    }
-                };
-
-                let sample: u32 = (sample.value() as u32)
-                    * (self.synthesis_mem[1].unwrap().value() as u32);
-
-                self.previous_samples[self.num_samples % self.previous_samples.len()] = sample;
-
-                let mut filtered_sample: usize = 0;
-                for k in 1..=12 {
-                    filtered_sample += (self.synthesis_mem[k + 1].unwrap().value() as usize)
-                        * (self.previous_samples[(self.num_samples + self.previous_samples.len()
-                            - k)
-                            % self.previous_samples.len()] as usize)
-                }
-
-                filtered_sample = filtered_sample >> 25;
-
-                // write sample for analysis
-                self.pcm_out
-                    .as_ref()
-                    .unwrap()
-                    .write(&[filtered_sample as u8, (filtered_sample >> 8) as u8])
-                    .unwrap();
-
                 let (mut ppc, underflow) = self
                     .pitch_period_counter
                     .unwrap()
@@ -929,7 +889,7 @@ impl TSP50 {
 
                 if underflow {
                     ppc = ppc.wrapping_add(self.pitch.unwrap());
-                    self.excitation_ptr = 0;
+                    self.excitation_ptr = self.excitation_rom.len() - 2;
                 }
 
                 if (underflow || self.pitch_period_counter.unwrap().value() >= 0x200)
@@ -939,6 +899,45 @@ impl TSP50 {
                 }
 
                 self.pitch_period_counter = Uninit::Some(ppc);
+
+                // Are we voiced or unvoiced?
+                let sample = if self.mode.contains(Mode::UNV) {
+                    // sample from random register
+                    u14::new(self.random & 0x3FFF)
+                } else {
+                    if self.pitch_period_counter.unwrap().value() <= 0x140 && self.excitation_ptr != 0 {
+                        // sample from activation function
+                        let sample = ((self.excitation_rom[self.excitation_ptr] as u16) << 8)
+                            | (self.excitation_rom[self.excitation_ptr + 1] as u16);
+                        self.excitation_ptr -= 2;
+ 
+                        assert!(sample < 0x4000);
+                        u14::new(sample)
+                    } else {
+                        u14::new(0)
+                    }
+                };
+
+                let sample = (sample.value() as f64 / (2 << 14) as f64)
+                    * (self.synthesis_mem[1].unwrap().value() as f64 / (2 << 12) as f64);
+
+                let mut filtered_sample: f64 = sample;
+                for k in 1..=12 {
+                    filtered_sample += (self.synthesis_mem[k + 1].unwrap().value() as f64 / (2 << 14) as f64)
+                        * (self.previous_samples[(self.num_samples + self.previous_samples.len() - k + 1)
+                            % self.previous_samples.len()])
+                }
+
+                self.previous_samples[self.num_samples % self.previous_samples.len()] = filtered_sample;
+
+                let output_sample = (filtered_sample * (2 << 16) as f64) as i16;
+
+                // write sample for analysis
+                self.pcm_out
+                    .as_ref()
+                    .unwrap()
+                    .write(&[output_sample as u8, (output_sample >> 8) as u8])
+                    .unwrap();
             }
 
             self.num_samples += 1;

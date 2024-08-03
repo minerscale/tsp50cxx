@@ -1,6 +1,8 @@
-use debugger::debug_loop;
+#![allow(dead_code)]
+
+//use debugger::debug_loop;
 use inline_colorization::*;
-use std::{fs::File, io::Read};
+use std::{fs::File, io::{stdout, Read}, os::fd::{AsRawFd, FromRawFd}};
 
 mod assembler;
 mod debugger;
@@ -10,12 +12,12 @@ mod uninit;
 
 use assembler::assemble;
 
-use crate::emulator::TSP50;
+use crate::emulator::{Status, TSP50};
 
 fn main() -> Result<(), ()> {
     let mut emulator = TSP50::new();
 
-    emulator.set_pcm_file(File::create("out.pcm").unwrap());
+    emulator.set_pcm_file(unsafe { File::from_raw_fd(stdout().as_raw_fd()) });
 
     let filename = "src/test.tsp";
     let mut source = String::new();
@@ -30,12 +32,15 @@ fn main() -> Result<(), ()> {
         Err(())?
     }
 
-    let (debug_syms, symbol_map) =
+    let (_debug_syms, _symbol_map) =
         assemble(filename, &source, emulator.rom_mut()).map_err(|e| println!("{e}"))?;
 
-    debug_loop(&source, debug_syms, symbol_map, &mut emulator)?;
+    while emulator.step() != Status::Halt {
 
-    println!("{}", emulator.num_cycles);
+    }
+    //debug_loop(&source, debug_syms, symbol_map, &mut emulator)?;
+
+    //println!("{}", emulator.num_cycles);
 
     Ok(())
 }
