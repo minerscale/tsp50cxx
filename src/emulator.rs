@@ -5,10 +5,7 @@
 use arbitrary_int::{u12, u14};
 use bitflags::bitflags;
 use std::{
-    fmt::{self, Debug},
-    fs::File,
-    io::Write,
-    ops::{Index, IndexMut},
+    fmt::{self, Debug}, fs::File, io::{BufWriter, Write}, ops::{Index, IndexMut}
 };
 
 use crate::{
@@ -146,7 +143,6 @@ struct Interrupt2 {
 }
 
 pub struct TSP50 {
-    pub num_cycles: usize,
     stack: Stack,
     pc: u14,
     a: Uninit<u14>,
@@ -168,9 +164,8 @@ pub struct TSP50 {
     ps_bits_left: Uninit<u8>,
     mode: Mode,
     random: u16,
-    excitation_ptr: usize,
 
-    pcm_out: Option<File>,
+    pcm_out: Option<BufWriter<File>>,
 
     interrupt_1: Interrupt1,
     interrupt_2: Interrupt2,
@@ -181,9 +176,13 @@ pub struct TSP50 {
     mem: [Uninit<u8>; 120],
     rom: [u8; 16384],
     excitation_rom: [u8; 384],
-    previous_samples: [f64; 12],
+    previous_sample: Option<f64>,
+    forward_prediction_error: [f64; 12],
+    backward_prediction_error: [f64; 12],
 
     num_samples: usize,
+    num_cycles: usize,
+    num_instruction_cycles: usize,
 }
 
 impl fmt::Debug for TSP50 {
@@ -220,14 +219,16 @@ impl Default for TSP50 {
             ps_bits_left: Default::default(),
             mode: Default::default(),
             random: Default::default(),
-            excitation_ptr: Default::default(),
             pcm_out: Default::default(),
             num_cycles: Default::default(),
+            num_instruction_cycles: Default::default(),
             synthesis_mem: [Default::default(); 16],
             mem: [Default::default(); 120],
             rom: [Default::default(); 16384],
             excitation_rom: [Default::default(); 384],
-            previous_samples: [Default::default(); 12],
+            previous_sample: Default::default(),
+            forward_prediction_error: Default::default(),
+            backward_prediction_error: Default::default(),
             num_samples: Default::default(),
         }
     }
@@ -238,6 +239,10 @@ impl TSP50 {
         Default::default()
     }
 
+    pub fn rom(&mut self) -> (&[u8], &[u8]) {
+        (&self.rom, &self.excitation_rom)
+    }
+
     pub fn rom_mut(&mut self) -> (&mut [u8], &mut [u8]) {
         (&mut self.rom, &mut self.excitation_rom)
     }
@@ -246,7 +251,7 @@ impl TSP50 {
         &self.pc
     }
 
-    pub fn set_pcm_file(&mut self, f: File) {
+    pub fn set_pcm_file(&mut self, f: BufWriter<File>) {
         self.pcm_out = Some(f);
     }
 
@@ -320,6 +325,10 @@ impl TSP50 {
         self.execute(instruction)
     }
 
+    pub fn run(&mut self) {
+        while self.step() == Status::Continue {}
+    }
+
     fn fetch(&mut self) -> Instruction {
         let opcode: u8 = self.rom[self.pc.value() as usize];
         let next_idx = self.pc.wrapping_add(u14::ONE);
@@ -353,12 +362,13 @@ impl TSP50 {
 
     fn sign_extend_12_to_14_if_extended_sign(&self, a: u12) -> u14 {
         let a = a.value();
-        u14::new(match self.integer_mode.unwrap() {
-            IntegerMode::ExtSign => match a >= 0x800 {
-                true => a | 0x3000,
-                false => a,
+
+        u14::new(match a >= 0x800 {
+            true => match self.integer_mode.unwrap() {
+                IntegerMode::ExtSign => a | 0x3000,
+                IntegerMode::Integer => a,
             },
-            IntegerMode::Integer => a,
+            false => a,
         })
     }
 
@@ -378,7 +388,7 @@ impl TSP50 {
         }
     }
 
-    fn read_mem(&mut self, addr: u8) -> u14 {
+    pub fn read_mem(&mut self, addr: u8) -> u14 {
         let addr = addr as usize;
         u14::new(match addr {
             0x00..=0x0F => self.synthesis_mem[addr].unwrap().value(),
@@ -487,6 +497,11 @@ impl TSP50 {
             I::ANDCM(Some(operand)) => {
                 self.set_status(true);
                 let addr = self.x.unwrap();
+
+                if addr < 0x10 {
+                    unimplemented!("ANDCM behaviour which I have not implemented");
+                }
+
                 let mem = self.read_mem_8(addr);
                 self.write_mem_8(mem & operand, addr);
             }
@@ -537,9 +552,9 @@ impl TSP50 {
             }
             I::DECMN => {
                 let addr = self.x.unwrap();
-                self.set_status(addr == 0);
-                let mem = self.read_mem(addr) + u14::new(0xFF);
-                self.write_mem(mem, addr)
+                let mem = self.read_mem(addr);
+                self.set_status(mem.value() == 0);
+                self.write_mem(mem.wrapping_sub(u14::ONE), addr);
             }
             I::DECXN => {
                 let (x, carry) = self.x.unwrap().overflowing_sub(1);
@@ -593,7 +608,7 @@ impl TSP50 {
                  * of the status flag following the GET instruction is important to the applica-
                  * tion, a GET 7 or a GET 8 should be avoided. */
                 if operand >= 7 {
-                    self.status = Default::default();
+                    self.status = Default::default(); // clobber status register
                 }
             }
             I::IAC => {
@@ -704,8 +719,6 @@ impl TSP50 {
                 self.a = Uninit::Some(self.a.unwrap().wrapping_sub(self.b.unwrap()));
             }
             I::SBR(Some(operand)) => {
-                self.set_status(true);
-
                 const PAGE_MASK: u14 = u14::new(0b11_1111_1000_0000);
                 if self.status.unwrap() {
                     self.pc = u14::new(operand as u16) | self.pc & PAGE_MASK;
@@ -720,10 +733,13 @@ impl TSP50 {
                      * since XXFFh -> X(X+1)00h. Only God knows why this happens.
                      */
 
-                    if self.pc & PAGE_MASK == u14::ZERO {
+                    if self.pc & !PAGE_MASK == u14::ZERO {
                         self.pc -= u14::new(0x80);
+                        panic!("weird hardware bug");
                     }
                 }
+
+                self.set_status(true);
             }
             I::SETOFF => return Status::Halt,
             I::SMAAN => {
@@ -819,7 +835,6 @@ impl TSP50 {
                     self.a = Default::default(); // clobber the A register
                     self.has_run_tmad = true;
                 } else {
-                    self.set_status(true);
                     self.a = Uninit::Some(self.read_mem_sign_extend(operand));
                 }
             }
@@ -870,10 +885,12 @@ impl TSP50 {
             _ => panic!("attempt to use opcode with None operand"),
         };
 
-        let last_cycles = self.num_cycles;
+        let last_cycles: usize = self.num_cycles;
+        let last_instruction_cycles = self.num_instruction_cycles;
         let cycles = instruction.cycles();
         let lpc_active = self.mode.contains(Mode::LPC);
         self.num_cycles += cycles * if lpc_active { 34 } else { 16 };
+        self.num_instruction_cycles += cycles;
 
         // Pitch period counter emulation
         if lpc_active {
@@ -881,7 +898,7 @@ impl TSP50 {
             // the DAC is running at approximately 20 kHz
 
             // Speech sample rate: 7.86MHz / 8Khz = 960
-            if last_cycles / 960 != self.num_cycles / 960 {
+            if self.num_instruction_cycles / 30 != last_instruction_cycles / 30 {
                 let (mut ppc, underflow) = self
                     .pitch_period_counter
                     .unwrap()
@@ -889,7 +906,6 @@ impl TSP50 {
 
                 if underflow {
                     ppc = ppc.wrapping_add(self.pitch.unwrap());
-                    self.excitation_ptr = self.excitation_rom.len() - 2;
                 }
 
                 if (underflow || self.pitch_period_counter.unwrap().value() >= 0x200)
@@ -901,43 +917,87 @@ impl TSP50 {
                 self.pitch_period_counter = Uninit::Some(ppc);
 
                 // Are we voiced or unvoiced?
-                let sample = if self.mode.contains(Mode::UNV) {
+                self.excitation = Uninit::Some(if self.mode.contains(Mode::UNV) {
                     // sample from random register
-                    u14::new(self.random & 0x3FFF)
+                    u14::new(self.random & 0xFFF)
                 } else {
-                    if self.pitch_period_counter.unwrap().value() <= 0x140 && self.excitation_ptr != 0 {
+                    if self.pitch_period_counter.unwrap().value() < 0x140 {
+                        let ppc = self.pitch_period_counter.unwrap().value() as usize;
+                        assert!(ppc % 2 == 0, "ppc must be even!");
                         // sample from activation function
-                        let sample = ((self.excitation_rom[self.excitation_ptr] as u16) << 8)
-                            | (self.excitation_rom[self.excitation_ptr + 1] as u16);
-                        self.excitation_ptr -= 2;
- 
+                        let sample = ((self.excitation_rom[ppc] as u16) << 8)
+                            | (self.excitation_rom[ppc + 1] as u16);
+
                         assert!(sample < 0x4000);
                         u14::new(sample)
                     } else {
                         u14::new(0)
                     }
-                };
+                });
 
-                let sample = (sample.value() as f64 / (2 << 14) as f64)
-                    * (self.synthesis_mem[1].unwrap().value() as f64 / (2 << 12) as f64);
+                let sample = u14_to_f64(self.excitation.unwrap())
+                    * u12_to_f64(self.synthesis_mem[1].unwrap());
 
-                let mut filtered_sample: f64 = sample;
-                for k in 1..=12 {
-                    filtered_sample += (self.synthesis_mem[k + 1].unwrap().value() as f64 / (2 << 14) as f64)
-                        * (self.previous_samples[(self.num_samples + self.previous_samples.len() - k + 1)
-                            % self.previous_samples.len()])
+                //let sample = u14_to_f64(self.excitation.unwrap());
+
+                fn u14_to_f64(x: u14) -> f64 {
+                    (if (x.value() & 0b10_0000_0000_0000) > 0 {
+                        -((!x + u14::new(1)).value() as f64)
+                    } else {
+                        x.value() as f64
+                    }) / (1 << 13) as f64
                 }
 
-                self.previous_samples[self.num_samples % self.previous_samples.len()] = filtered_sample;
+                fn u12_to_f64(x: u12) -> f64 {
+                    (if (x.value() & 0b1000_0000_0000) > 0 {
+                        -((!x + u12::new(1)).value() as f64)
+                    } else {
+                        x.value() as f64
+                    }) / (1 << 11) as f64
+                }
 
-                let output_sample = (filtered_sample * (2 << 16) as f64) as i16;
+                //self.forward_prediction_error[0] = sample;
+                //self.backward_prediction_error[0] = self.previous_sample.unwrap_or(sample);
+                self.backward_prediction_error[0] = 0.0;
+                let mut prev_b = 0.0;
+                for i in 0..12 {
+                    let k = f64::sqrt(2.0)*u12_to_f64(self.synthesis_mem[0xd - i].unwrap());
 
-                // write sample for analysis
-                self.pcm_out
-                    .as_ref()
-                    .unwrap()
-                    .write(&[output_sample as u8, (output_sample >> 8) as u8])
-                    .unwrap();
+                    let e = match i {
+                        0 => sample,
+                        _ => self.forward_prediction_error[i - 1],
+                    };
+                    let b = prev_b;
+                    prev_b = self.backward_prediction_error[i];
+
+                    self.forward_prediction_error[i] = e + k * b;
+                    self.backward_prediction_error[i] = b + k * e;
+                }
+
+                let filtered_sample = self.forward_prediction_error[11];
+                self.previous_sample = Some(filtered_sample);
+
+                let mut write_sample = |s: f64| {
+                    let output_sample = (s * (1 << 15) as f64) as i16;
+
+                    // write sample for analysis
+                    self.pcm_out
+                        .as_mut()
+                        .unwrap()
+                        .write(&[output_sample as u8, (output_sample >> 8) as u8])
+                        .unwrap();
+                };
+
+                write_sample(filtered_sample);
+                write_sample(sample);
+                write_sample(u14_to_f64(self.excitation.unwrap()));
+                write_sample(self.timer.unwrap() as f64 / 256.0);
+
+                for i in 4..16 {
+                    let channel = u12_to_f64(self.synthesis_mem[i].unwrap());
+
+                    write_sample(channel);
+                }
             }
 
             self.num_samples += 1;
@@ -964,8 +1024,7 @@ impl TSP50 {
 
         for _ in 0..cycles {
             // update random number generator once for each clock cycle
-            self.random =
-                (self.random << 1) | (self.random & 0x4000 == self.random & 0x2000) as u16;
+            self.random = (self.random << 1) | (((self.random & 0x4000) >> 1) == self.random & 0x2000) as u16;
         }
 
         Status::Continue

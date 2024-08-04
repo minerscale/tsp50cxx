@@ -49,11 +49,11 @@ pub fn debug_loop(
 
                 let height: usize = terminal_size().unwrap().1 .0.into();
 
-                let page_size = height - 9;
+                let page_size = height - 7;
                 let lower_line = (line_number / page_size) * page_size;
                 let upper_line = (lower_line + page_size).clamp(0, lines.len());
 
-                //print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+                print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                 println!();
                 for (n, l) in lines[lower_line..upper_line].iter().enumerate() {
                     if l.as_ptr() == sym.as_ptr() {
@@ -102,6 +102,63 @@ pub fn debug_loop(
                     'r' => {
                         show_prompt = false;
                         break;
+                    }
+                    'p' => {
+                        match (|| {
+                            let input = strip_whitespace(
+                                &input[input
+                                    .char_indices()
+                                    .nth(1)
+                                    .ok_or("p: requires an argument")?
+                                    .0..],
+                            )
+                            .ok_or("p: requires an argument")?;
+
+                            let mut indirect_mode = false;
+                            let input_stripped = strip_whitespace(
+                                match input.char_indices().find(|(_, c)| !c.is_whitespace()) {
+                                    Some((_, '$')) => {
+                                        indirect_mode = true;
+                                        &input[input
+                                            .char_indices()
+                                            .nth(1)
+                                            .ok_or("b: an expression must follow ':'")?
+                                            .0..]
+                                    }
+                                    _ => input,
+                                },
+                            )
+                            .ok_or("an expression must follow ':'")?;
+
+                            let mut a = resolve_expression(
+                                &parse_expression(input_stripped).map_err(|x| {
+                                    x.msg.iter().fold(String::new(), |acc, &s| acc + s)
+                                })?,
+                                &symbol_map,
+                            )
+                            .map_err(|e| e.1.to_string() + ": " + e.0)?;
+
+                            if indirect_mode {
+                                a = emulator
+                                    .read_mem(
+                                        u8::try_from(a)
+                                            .map_err(|_| format!("invalid address {a}"))?,
+                                    )
+                                    .value()
+                                    .into();
+                            }
+
+                            Ok(format!("{input}: #{:x}", a))
+                        })() {
+                            Ok(s) => {
+                                error_red = false;
+                                error = s
+                            }
+                            Err(e) => {
+                                error_red = true;
+                                error = e
+                            }
+                        }
                     }
                     'b' => match (|| {
                         let input = strip_whitespace(

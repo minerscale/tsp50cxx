@@ -199,7 +199,7 @@ PSVALUE:    EQU SAMPLES*60/256   % Prescale Value
 %   Device Constants
 %
 C1_Value:   EQU #F61             % C1 Value
-C2_Value:   EQU #F61             % C2 Value
+C2_Value:   EQU #B67             % C2 Value
 MAX_RAM:    EQU #7F              % Highest RAM location
 %
 %   Special Energy Values
@@ -207,7 +207,7 @@ MAX_RAM:    EQU #7F              % Highest RAM location
 ESTOP:      EQU 15               % Stop code
 ESILENCE:   EQU 0                % Silence code
 %
-%   Speceal Pitch Values
+%   Special Pitch Values
 %
 PUnVoiced:  EQU 0                % UnVoiced Frame Code
 %
@@ -555,7 +555,7 @@ intpch:     tcx     PHV2       % combine new pitch and new
             tcx     SCALE
             axma               % (K1current - K1new)*Timer
             abaac              % K1new + (K1current - K1new)*Timer
-            tmad    K1         % load interpolated K1 value
+            tamd    K1         % load interpolated K1 value
 %
 % Interpolate K2 and store the result in the
 % working K2 register
@@ -769,7 +769,7 @@ intpch:     tcx     PHV2       % combine new pitch and new
             tcx     SCALE
             axma               % (Ecurrent - Enew) * Timer
             abaac              % Enew + (Ecurrent - Enew) * Timer
-            xba                % save energy
+            xba                % save energy (mysteriously 0x6a in spec!?)
 %
 % Set voiced/unvoiced mode according to current frame type.
 % This is done in a two step fashion:  first the value in
@@ -792,7 +792,7 @@ setuv:      tcx     MODE_BUF   % current frame is unvoiced, so
 writemode:  tma                % write mode information
             tamode             % to mode register
 
-            xba                % write mode information
+            xba                % write energy
             tamd    EN         % to filter
 
 ireti:      reti               % return from interrupt
@@ -832,7 +832,7 @@ updt00:     tcx     FLAGS
 % Transfer the state of the previous frame to the Unvoiced
 % flag (Current).
 %
-            tstcm   Unv_Flg1   % Was previous frame unvioced?
+            tstcm   Unv_Flg1   % Was previous frame unvoiced?
             br      sunvl      %   yes, current frame = unvoiced
             andcm  ~Unv_Flg2   %   no, current frame = voiced
             br      tsil       %   and continue
@@ -851,7 +851,7 @@ ssil:       orcm    Sil_Flg2   % Set current frame to silent
 %
 % Reset the Repeat Flag, new Silence Flag, new Unvoiced
 % Flag, and Interpolation Inhibit flag so that new
-% valnues can be loaded in this routine.
+% values can be loaded in this routine.
 %
 zroflg:     tcx     FLAGS
             andcm   #c5
@@ -968,7 +968,7 @@ sflg1:      orcm    R_FLAG     % set repeat flag
 
 updt3:      cla
             get     4          % get coded pitch
-            get     3          % get coded petch
+            get     3          % get coded pitch
             anec    PUnVoiced  % Is the frame unvoiced?
             sbr     updt3a     %   no, continue
             orcm    Unv_Flg1   %   yes, set unvoiced flag
@@ -999,7 +999,7 @@ updt3a:     sala               % double coded pitch and
 % applies, then we branch to code which inhibits
 % interpolation.
 %
-updt3b:     tstcm   Sil_Flg2   % Was the last rame silent?
+updt3b:     tstcm   Sil_Flg2   % Was the last frame silent?
             br      updt5      %   yes, inhibit interpolation
 
             tstcm   Unv_Flg2   % Was the last frame unvoiced
@@ -1417,12 +1417,12 @@ tblk1:      BYTE    #81,#00
             BYTE    #cc,#04
             BYTE    #cf,#0c
             BYTE    #d3,#08
-            BYTE    #d7,#04
+            BYTE    #d7,#08
             BYTE    #db,#04
-            BYTE    #df,#08
-            BYTE    #e3,#0c
-            BYTE    #e7,#00
-            BYTE    #ec,#04
+            BYTE    #df,#04
+            BYTE    #e3,#08
+            BYTE    #e7,#0c
+            BYTE    #ec,#00
             BYTE    #f0,#04
             BYTE    #f4,#0c
             BYTE    #f9,#0c

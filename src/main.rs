@@ -1,8 +1,11 @@
-#![allow(dead_code)]
-
+use debugger::debug_loop;
 //use debugger::debug_loop;
 use inline_colorization::*;
-use std::{fs::File, io::{stdout, Read}, os::fd::{AsRawFd, FromRawFd}};
+use std::{
+    env::args,
+    fs::File,
+    io::{BufWriter, Read, Write},
+};
 
 mod assembler;
 mod debugger;
@@ -12,12 +15,12 @@ mod uninit;
 
 use assembler::assemble;
 
-use crate::emulator::{Status, TSP50};
+use crate::emulator::TSP50;
 
 fn main() -> Result<(), ()> {
     let mut emulator = TSP50::new();
 
-    emulator.set_pcm_file(unsafe { File::from_raw_fd(stdout().as_raw_fd()) });
+    emulator.set_pcm_file(BufWriter::new(File::create("trace").unwrap()));
 
     let filename = "src/test.tsp";
     let mut source = String::new();
@@ -32,15 +35,27 @@ fn main() -> Result<(), ()> {
         Err(())?
     }
 
-    let (_debug_syms, _symbol_map) =
+    let (debug_syms, symbol_map) =
         assemble(filename, &source, emulator.rom_mut()).map_err(|e| println!("{e}"))?;
 
-    while emulator.step() != Status::Halt {
+    let limit = emulator
+        .rom()
+        .0
+        .iter()
+        .enumerate()
+        .rfind(|(_, &x)| x != 0x00)
+        .unwrap()
+        .0
+        + 1;
+    File::create("test.bin")
+        .unwrap()
+        .write_all(&emulator.rom().0[0..limit])
+        .unwrap();
 
-    }
-    //debug_loop(&source, debug_syms, symbol_map, &mut emulator)?;
-
-    //println!("{}", emulator.num_cycles);
+    match args().find(|x| x == "dbg") {
+        Some(_) => debug_loop(&source, debug_syms, symbol_map, &mut emulator)?,
+        None => emulator.run(),
+    };
 
     Ok(())
 }

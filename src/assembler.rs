@@ -678,28 +678,50 @@ pub fn assemble<'a>(
         };
 
         match r.directive {
-            Directive::I((i, expr)) => {
-                match i
-                    .set_operand_value(
-                        resolve_expression(expr.as_ref().unwrap(), &symbols).map_err(
+            Directive::I((i, expr)) => match i {
+                // Special treatment is required for the SBR instruction
+                Instruction::SBR(_) => {
+                    if write_idx & 0x7f == 0x7f {
+                        panic!("An SBR instruction executed at XX7Fh or XXFFh with status cleared (branch not taken) goes to XX00h or XX80h, respectively.")
+                    }
+
+                    buf[write_idx] = Instruction::SBR(Some(
+                        (resolve_expression(&expr.unwrap(), &symbols).map_err(
                             |(msg, squiggly)| make_error_msg(msg, squiggly, source, filename),
-                        )?,
-                    )
-                    .map_err(|msg| {
-                        make_error_msg(msg, expr.as_ref().unwrap().debug.unwrap(), source, filename)
-                    })?
+                        )? & 0x7F) as u8,
+                    ))
                     .to_opcode()
                     .unwrap()
-                {
-                    (x, None) => {
-                        buf[write_idx] = x;
-                    }
-                    (x, Some(y)) => {
-                        buf[write_idx] = x;
-                        buf[write_idx + 1] = y;
+                    .0
+                }
+                _ => {
+                    match i
+                        .set_operand_value(
+                            resolve_expression(expr.as_ref().unwrap(), &symbols).map_err(
+                                |(msg, squiggly)| make_error_msg(msg, squiggly, source, filename),
+                            )?,
+                        )
+                        .map_err(|msg| {
+                            make_error_msg(
+                                msg,
+                                expr.as_ref().unwrap().debug.unwrap(),
+                                source,
+                                filename,
+                            )
+                        })?
+                        .to_opcode()
+                        .unwrap()
+                    {
+                        (x, None) => {
+                            buf[write_idx] = x;
+                        }
+                        (x, Some(y)) => {
+                            buf[write_idx] = x;
+                            buf[write_idx + 1] = y;
+                        }
                     }
                 }
-            }
+            },
             Directive::Byte(x) => {
                 for (idx, e) in x.unwrap().iter().enumerate() {
                     buf[write_idx + idx] = resolve_expression(e, &symbols)
